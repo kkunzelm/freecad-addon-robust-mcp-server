@@ -26,6 +26,7 @@ For detailed documentation including parameters and examples, see [MCP Tools Ref
 | [Validation](#validation-tools)                 | 4     | Object/document health checking      |
 | [View & Display](#view-tools)                   | 11    | View control, screenshots (GUI only) |
 | [Export/Import](#export-tools)                  | 7     | File format conversion               |
+| [CAM](#cam-tools)                               | 17    | CAM jobs, toolpaths, G-code          |
 | [Macros](#macro-tools)                          | 6     | Macro management                     |
 | [Utility](#utility-tools)                       | 7     | Undo/redo, parts library             |
 
@@ -399,6 +400,36 @@ returns PNG data encoded as base64 in `data`; it does not accept a file path.
 | `export_iges` | Export to IGES format              |
 | `import_step` | Import STEP files                  |
 | `import_stl`  | Import STL files                   |
+
+---
+
+## CAM Tools
+
+Build CAM jobs and G-code without dialogs. Every operation and dressup type
+of the CAM workbench is supported; `cam_describe_type` lists all options of a
+type with defaults and allowed values.
+
+| Tool                         | Description                                                                        |
+| ---------------------------- | ---------------------------------------------------------------------------------- |
+| `cam_get_capabilities`       | List CAM operation/dressup types, post processors, templates, known FreeCAD issues |
+| `cam_list_tool_library`      | List tool libraries, tool bits and tool shapes                                     |
+| `cam_analyze_model`          | List model faces and drillable holes to choose Base features                       |
+| `cam_create_job`             | Create a CAM job (no dialog), optional template, model offset, stock               |
+| `cam_set_stock`              | Replace job stock: from_base margins, box or cylinder                              |
+| `cam_add_tool_controller`    | Add tool bit (library, file or shape) with speeds and feeds                        |
+| `cam_remove_tool_controller` | Remove an unused tool controller                                                   |
+| `cam_add_operation`          | Add any CAM operation (Profile, Pocket, Adaptive, Drilling, Helix, ...)            |
+| `cam_add_dressup`            | Add a dressup (Tags, Boundary, Dogbone, LeadInOut, RampEntry, ...)                 |
+| `cam_describe_type`          | List every option of an operation/dressup type with defaults                       |
+| `cam_get_properties`         | Read all properties of a CAM object with metadata                                  |
+| `cam_set_properties`         | Set validated properties/expressions on a CAM object                               |
+| `cam_set_operation_order`    | Reorder job operations (G-code order)                                              |
+| `cam_inspect_job`            | Describe job: stock, tools, operations with path checks                            |
+| `cam_inspect_path`           | Toolpath summary and warnings of one operation                                     |
+| `cam_post_process`           | Post-process to G-code without dialogs, write file                                 |
+| `cam_export_job_template`    | Save job settings as FreeCAD job_*.json template                                   |
+
+Always check generated G-code in a simulator before running it on a machine.
 
 ---
 

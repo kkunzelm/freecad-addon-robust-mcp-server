@@ -148,6 +148,7 @@ Or read the full `freecad://best-practices` resource for comprehensive documenta
                 - "sketching": 2D sketch creation
                 - "boolean": Boolean operations
                 - "export": File export operations
+                - "cam": CAM jobs, toolpaths and G-code
                 - "debugging": Troubleshooting issues
                 - "validation": Checking model health
 
@@ -357,6 +358,37 @@ If boolean fails:
 - **Export fails**: Object has invalid shape
 - **Missing objects**: Object not visible or wrong document
 - **Wrong file**: Path error or permission issue""",
+            "cam": """# CAM (Toolpath / G-code) Guidance
+
+## Workflow
+1. `cam_get_capabilities()` - types, post processors, templates, known issues
+2. `cam_analyze_model(object_name)` - faces and holes for operation Base
+3. `cam_create_job(model_objects, template=..., stock=...)`
+4. `cam_add_tool_controller(tool=..., horiz_feed="800 mm/min", ...)`
+   (or use a job template that already holds the tool controllers)
+5. `cam_add_operation(op_type, tool_controller, base, properties)`
+6. `cam_add_dressup("Tags", base_operation, tag_count=4)` etc.
+7. `cam_inspect_job()` - check every path summary: warnings and notes
+8. `cam_post_process(post_processor="linuxcnc", output_file=...)`
+
+## Options
+- `cam_describe_type(type_name, kind)` lists every option with defaults,
+  allowed enumeration values and tooltips. Use it instead of guessing.
+- Depths are expressions by default; a value replaces the expression.
+- Quantities take units: "5 mm", "800 mm/min", "90 °". Bare feed numbers
+  are mm/s.
+
+## Safety
+- Read every path warning (feed 0, rapids below stock top, cuts outside
+  stock) before posting.
+- G-code must be checked in a simulator before it runs on a machine.
+- Machine/material defaults belong in job templates
+  (`cam_export_job_template`), not in ad-hoc values.
+
+## Known FreeCAD Issues
+`cam_add_dressup` fails (and is undone) if FreeCAD leaves the dressed
+operation in the job, which would cut it twice. That is a FreeCAD bug,
+reported in `cam_get_capabilities()` under known_freecad_issues.""",
             "debugging": """# Debugging Guidance
 
 ## First Steps
