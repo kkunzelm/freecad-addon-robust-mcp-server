@@ -348,12 +348,19 @@ def _enums(obj: Any, prop: str) -> list[str] | None:
         return None
 
 
+# FreeCAD bookkeeping, not options: expressions are reported per property and
+# paths by path_summary()
+_INTERNAL_PROPS = {"Proxy", "ExpressionEngine", "_ElementMapVersion", "Path"}
+
+
 def _describe_props(
     obj: Any, groups: list[str] | None = None, include_hidden: bool = False
 ) -> list[dict[str, Any]]:
     exprs = dict(obj.ExpressionEngine)
     out = []
     for prop in obj.PropertiesList:
+        if prop in _INTERNAL_PROPS:
+            continue
         status = obj.getPropertyStatus(prop)
         hidden = "Hidden" in status
         if hidden and not include_hidden:
@@ -1024,9 +1031,9 @@ def path_summary(  # noqa: PLR0912 - one pass over the commands, many cases
     notes = []
     if not cmds or not cut["Z"]:
         warnings.append("no cutting moves (check Base, depths and tool controller)")
-    if rapid_low:
+    if rapid_low and stock_top is not None:
         warnings.append(
-            f"{rapid_low} rapid XY moves below the stock top (Z {stock_top:g}); "
+            f"{rapid_low} rapid XY moves below the stock top (Z {round(stock_top, 3):g}); "
             "verify they stay in material that is already removed"
         )
     if job is not None and cut["Z"] and job.Stock is not None:
@@ -1042,7 +1049,8 @@ def path_summary(  # noqa: PLR0912 - one pass over the commands, many cases
             or max(cut["Y"]) > sb.YMax + 1e-6
         ):
             warnings.append("cutting moves outside the stock XY bounds")
-    if 0.0 in feeds:
+    # FreeCAD omits F entirely when the tool controller feed is 0
+    if 0.0 in feeds or (cut["Z"] and not feeds):
         warnings.append("feed rate 0 in path (tool controller feeds not set?)")
     out["warnings"] = warnings
     out["notes"] = notes
@@ -1139,6 +1147,7 @@ def inspect_job(args: dict[str, Any]) -> dict[str, Any]:
             p: _safe(getattr(ss, p))
             for p in ss.PropertiesList
             if ss.getGroupOfProperty(p) not in ("Base",)
+            and p not in _INTERNAL_PROPS
             and not p.startswith("_")
             and "Hidden" not in ss.getPropertyStatus(p)
         },
