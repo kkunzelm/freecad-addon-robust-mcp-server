@@ -26,7 +26,7 @@ For detailed documentation including parameters and examples, see [MCP Tools Ref
 | [Validation](#validation-tools)                 | 4     | Object/document health checking      |
 | [View & Display](#view-tools)                   | 11    | View control, screenshots (GUI only) |
 | [Export/Import](#export-tools)                  | 7     | File format conversion               |
-| [CAM](#cam-tools)                               | 17    | CAM jobs, toolpaths, G-code          |
+| [CAM](#cam-tools)                               | 22    | CAM jobs, toolpaths, G-code          |
 | [Macros](#macro-tools)                          | 6     | Macro management                     |
 | [Utility](#utility-tools)                       | 7     | Undo/redo, parts library             |
 
@@ -428,12 +428,24 @@ type with defaults and allowed values.
 | `cam_inspect_path`           | Toolpath summary and warnings of one operation                                     |
 | `cam_post_process`           | Post-process to G-code without dialogs, write file                                 |
 | `cam_export_job_template`    | Save job settings as FreeCAD job_*.json template                                   |
+| `cam_check_job`              | FreeCAD job check (Sanity): findings, summary, optional HTML report                |
+| `cam_simulate`               | Voxel material removal simulation; gouge and material-left check against the part  |
+| `cam_place_model`            | Turn/move the part in a job (flip for a second setup), stock follows               |
+| `cam_import_tool_library`    | Import a .fctl or Camotics .json tool library with its tool bits                   |
+| `cam_export_tool_library`    | Export a tool library as .fctl, Camotics .json or LinuxCNC .tbl                    |
 
 Always check generated G-code in a simulator before running it on a machine.
 
 `cam_post_process(use_job_output=True)` writes the files where FreeCAD's Post
 Process command would, named by the job's output pattern
-(`Job.PostProcessorOutputFile`, e.g. `%D/%S-%t-%d.nc`).
+(`Job.PostProcessorOutputFile`, e.g. `%D/%S-%t-%d.nc`). On FreeCAD 26.3+ a job
+with a machine (`Job.Machine`, a `.fcm` file in `CamAssets/Machines`) gets its
+post processor and options from the machine.
+
+`cam_add_operation` also creates Comment, Stop, Copy, Array and SimpleCopy
+(`source_operations=[...]`); `cam_add_dressup` also Boundary2, Mirror and
+PlungeMilling (FreeCAD 26.3+, GUI only). `cam_simulate` uses FreeCAD's voxel
+simulator (3-axis, from above) and needs FreeCAD 26.3+.
 
 ---
 

@@ -345,6 +345,7 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
         name: str | None = None,
         label: str | None = None,
         doc_name: str | None = None,
+        source_operations: list[str] | None = None,
     ) -> dict[str, Any]:
         """Add any CAM operation to a job.
 
@@ -356,7 +357,14 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
             op_type: Operation type, e.g. "Profile", "Pocket", "PocketShape",
                 "Adaptive", "MillFace", "Helix", "Drilling", "Tapping",
                 "ThreadMilling", "Engrave", "Vcarve", "Deburr", "Slot",
-                "Surface", "Waterline", "Probe", "Custom".
+                "Surface", "Waterline", "Probe", "Custom"; or one that works
+                on other operations or the program flow: "Comment" (property
+                Comment), "Stop" (property Stop: "Mandatory" M0 / "Optional"
+                M1), "Copy" (linked copy of one operation), "Array" (linear,
+                polar or point array of operations with one tool controller,
+                coolant None), "SimpleCopy" (fixed G-code copy). These take no
+                tool_controller or base and are appended at the end of the
+                job; reorder with cam_set_operation_order.
             job_name: Job. Optional if the document has exactly one job.
             tool_controller: Tool controller (name or label). Required when
                 the job has more than one.
@@ -370,6 +378,8 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
             name: Internal object name. The type if None.
             label: Display label.
             doc_name: Document. Uses the active document if None.
+            source_operations: Copy, Array, SimpleCopy only: the operations to
+                copy or array (names or labels), top-level in the job.
 
         Returns:
             Dictionary with name, label, type, what was set, and a path summary
@@ -387,6 +397,7 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
                 "name": name,
                 "label": label,
                 "doc_name": doc_name,
+                "source_operations": source_operations,
             },
             f"Add {op_type} Operation",
         )
@@ -410,7 +421,9 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
 
         Args:
             dressup_type: "Tags", "Boundary", "Dogbone", "Array", "LeadInOut",
-                "RampEntry", "Dragknife", "AxisMap" or "ZCorrect".
+                "RampEntry", "Dragknife", "AxisMap", "ZCorrect", and on
+                FreeCAD 26.3+ "Boundary2", "Mirror", "PlungeMilling". All but
+                the first four need the FreeCAD GUI.
             base_operation: Operation or dressup to dress (name or label).
             properties: Property values, e.g. {"Width": 6, "Height": 1.5}.
             expressions: Property expressions.
@@ -707,4 +720,195 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
                 "include_post": include_post,
                 "doc_name": doc_name,
             },
+        )
+
+    @mcp.tool()
+    async def cam_check_job(
+        job_name: str | None = None,
+        report_file: str | None = None,
+        images: bool = False,
+        doc_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Run FreeCAD's job check ("Sanity") and optionally write its report.
+
+        The same checks as FreeCAD's CAM Sanity command: tool controllers
+        without feed or spindle speed, missing stock material, operations
+        without tool, fixtures, and (FreeCAD 26.3+) the machine's post
+        processor checks, e.g. spindle speed limits.
+
+        Args:
+            job_name: Job. Optional if the document has exactly one job.
+            report_file: Write FreeCAD's HTML report to this file.
+            images: Embed 3D views in the report (GUI only; opens views).
+            doc_name: Document. Uses the active document if None.
+
+        Returns:
+            Dictionary with ok (no WARNING/CAUTION), critical (count),
+            findings (level NOTE/TIP/WARNING/CAUTION, message, source),
+            summary (cycle time, Z range, operations, stock) and report_file.
+        """
+        return await run(
+            "check_job",
+            {
+                "job_name": job_name,
+                "report_file": report_file,
+                "images": images,
+                "doc_name": doc_name,
+            },
+        )
+
+    @mcp.tool()
+    async def cam_simulate(
+        job_name: str | None = None,
+        operations: list[str] | None = None,
+        resolution: float | None = None,
+        compare_with_model: bool = True,
+        result_file: str | None = None,
+        show_result: bool = False,
+        doc_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Simulate material removal and check for cuts into the part.
+
+        Uses FreeCAD's voxel simulator (the engine of its older CAM
+        simulator, FreeCAD 26.3+): the stock is cut along the toolpaths of
+        the active operations with their tool shapes, seen from above
+        (3-axis; feeds, holder and collisions are not simulated). The
+        result is compared with the model's top surface on a grid: material
+        removed below the part's surface is reported as a gouge, material
+        left above it as material_left_on_part_max. Points closer than two
+        grid cells to the part's outline or steps are not judged.
+
+        Args:
+            job_name: Job. Optional if the document has exactly one job.
+            operations: Only these operations (names or labels), in this
+                order. All active ones in job order if None.
+            resolution: Voxel size in mm. Default: stock size / 400,
+                between 0.05 and 0.5 mm. Smaller is slower.
+            compare_with_model: Run the gouge / material left check.
+            result_file: Write the simulated stock as a mesh (.stl, .obj).
+            show_result: Add the simulated stock to the document as a mesh
+                object (and hide the stock in the GUI). Undoable.
+            doc_name: Document. Uses the active document if None.
+
+        Returns:
+            Dictionary with operations, resolution, stock/remaining/removed
+            volume, model_check (gouge found, points, area, max depth, worst
+            locations; material_left_on_part_max), result_file, result_object.
+        """
+        return await run(
+            "simulate",
+            {
+                "job_name": job_name,
+                "operations": operations,
+                "resolution": resolution,
+                "compare_with_model": compare_with_model,
+                "result_file": result_file,
+                "show_result": show_result,
+                "doc_name": doc_name,
+            },
+            "Simulate CAM Job",
+        )
+
+    @mcp.tool()
+    async def cam_place_model(
+        job_name: str | None = None,
+        rotate: dict[str, Any] | None = None,
+        face_up: dict[str, str] | None = None,
+        origin: dict[str, str] | None = None,
+        move: list[float] | None = None,
+        doc_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Turn and move the part in a job, e.g. flipped for the second side.
+
+        Works on the job's model clones like FreeCAD's Job dialog (the
+        original objects stay where they are). For a second setup, create a
+        second job for the same model and place it here. Operations are
+        recomputed. A stock "from base" is re-created with the same margins;
+        a box or cylinder stock is turned and moved with the part.
+
+        Args:
+            job_name: Job. Optional if the document has exactly one job.
+            rotate: {"axis": "x"|"y"|"z" or [x, y, z], "angle": degrees},
+                around the center of the part's bounding box. Flip:
+                {"axis": "x", "angle": 180}.
+            face_up: {"object": "<model>", "face": "Face3"}: turn the part so
+                this face points up (+Z). Not together with rotate.
+            origin: Put the part's bounding box at the origin afterwards:
+                {"x": "min"|"max"|"center"|"keep", "y": ...,
+                 "z": "top"|"bottom"|"center"|"keep"}; e.g. {"x": "min",
+                "y": "min", "z": "top"} for X0 Y0 at the lower left, Z0 on top.
+            move: [x, y, z] shift in mm, applied together with origin.
+            doc_name: Document. Uses the active document if None.
+
+        Returns:
+            Dictionary with rotation, move, model_bound_box, stock_bound_box,
+            how the stock was handled and the recomputed operations.
+        """
+        return await run(
+            "place_model",
+            {
+                "job_name": job_name,
+                "rotate": rotate,
+                "face_up": face_up,
+                "origin": origin,
+                "move": move,
+                "doc_name": doc_name,
+            },
+            "Place CAM Model",
+        )
+
+    @mcp.tool()
+    async def cam_import_tool_library(
+        file_path: str,
+        library_id: str | None = None,
+        label: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Import a tool library file into FreeCAD's tool library store.
+
+        Formats FreeCAD can import: FreeCAD .fctl (its bits are found in the
+        stores or in a Bit/ folder next to the Library/ folder) and Camotics
+        .json. LinuxCNC .tbl tables can only be exported (FreeCAD has no
+        importer). Tool numbers are kept. Camotics tools are stored as
+        <library_id>_T<number>.
+
+        Args:
+            file_path: The library file.
+            library_id: Id (file name) in the store. The file name if None.
+            label: Display name. The file's label or the id if None.
+            overwrite: Replace an existing library / bits with the same id.
+
+        Returns:
+            Dictionary with library, label, format, tools (number, id, label),
+            bits_added, bits_already_stored.
+        """
+        return await run(
+            "import_tool_library",
+            {
+                "file_path": file_path,
+                "library_id": library_id,
+                "label": label,
+                "overwrite": overwrite,
+            },
+        )
+
+    @mcp.tool()
+    async def cam_export_tool_library(
+        library: str,
+        file_path: str,
+    ) -> dict[str, Any]:
+        """Write a tool library to a file; the format follows the extension.
+
+        .fctl (FreeCAD), .json (Camotics) or .tbl (LinuxCNC tool table:
+        T<n> ... D<diameter> ;label).
+
+        Args:
+            library: Library id or label (see cam_list_tool_library).
+            file_path: Target file.
+
+        Returns:
+            Dictionary with file, format, library and the number of tools.
+        """
+        return await run(
+            "export_tool_library", {"library": library, "file_path": file_path}
         )

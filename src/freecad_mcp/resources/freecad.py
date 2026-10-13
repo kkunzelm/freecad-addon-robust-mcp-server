@@ -1498,6 +1498,31 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "description": "Save job settings as FreeCAD job_*.json template",
                             "key_params": ["file_path"],
                         },
+                        {
+                            "name": "cam_check_job",
+                            "description": "FreeCAD job check (Sanity): findings, HTML report",
+                            "key_params": ["job_name", "report_file"],
+                        },
+                        {
+                            "name": "cam_simulate",
+                            "description": "Voxel material removal simulation, gouge check",
+                            "key_params": ["operations", "resolution", "show_result"],
+                        },
+                        {
+                            "name": "cam_place_model",
+                            "description": "Turn/move the part in a job (second setup)",
+                            "key_params": ["rotate", "face_up", "origin"],
+                        },
+                        {
+                            "name": "cam_import_tool_library",
+                            "description": "Import .fctl or Camotics .json tool library",
+                            "key_params": ["file_path", "library_id"],
+                        },
+                        {
+                            "name": "cam_export_tool_library",
+                            "description": "Export tool library as .fctl, .json or .tbl",
+                            "key_params": ["library", "file_path"],
+                        },
                     ],
                 },
                 "export_import": {

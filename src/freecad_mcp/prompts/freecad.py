@@ -369,9 +369,29 @@ If boolean fails:
 5. `cam_add_operation(op_type, tool_controller, base, properties)`
 6. `cam_add_dressup("Tags", base_operation, tag_count=4)` etc.
 7. `cam_inspect_job()` - check every path summary: warnings and notes
-8. `cam_post_process(post_processor="linuxcnc", output_file=...)`
-   (or `use_job_output=True`: folder and file names from the job's output
-   pattern, the same names FreeCAD's Post Process command writes)
+8. `cam_check_job()` - FreeCAD's job check (missing feeds, speeds, ...)
+9. `cam_simulate()` - cut the stock, report gouges into the part
+10. `cam_post_process(use_job_output=True)`: folder and file names from the
+   job's output pattern, as FreeCAD's Post Process command. With a machine
+   (FreeCAD 26.3+, Job.Machine) the machine sets post processor and
+   options; otherwise pass a legacy `post_processor`.
+
+## Program Flow and Copies
+- `cam_add_operation("Comment", properties={"Comment": "..."})`,
+  `cam_add_operation("Stop", properties={"Stop": "Mandatory"})` (M0/M1)
+- `cam_add_operation("Copy"|"Array"|"SimpleCopy", source_operations=[...])`
+- New operations are appended; `cam_set_operation_order` moves them.
+
+## Setups and Fixtures
+- Second side: a second job for the same model, then
+  `cam_place_model(rotate={"axis": "x", "angle": 180},
+  origin={"x": "min", "y": "min", "z": "top"})` (or `face_up=`).
+- Several workpieces/fixtures: Job.Fixtures (e.g. ["G54", "G55"]) and
+  Job.OrderOutputBy ("Fixture", "Tool", "Operation") via cam_set_properties.
+
+## Tool Libraries
+- `cam_import_tool_library(file_path)`: .fctl or Camotics .json.
+- `cam_export_tool_library(library, file_path)`: .fctl, .json or LinuxCNC .tbl.
 
 ## Options
 - `cam_describe_type(type_name, kind)` lists every option with defaults,
@@ -383,7 +403,8 @@ If boolean fails:
 ## Safety
 - Read every path warning (feed 0, rapids below stock top, cuts outside
   stock) before posting.
-- G-code must be checked in a simulator before it runs on a machine.
+- G-code must be checked in a simulator before it runs on a machine;
+  `cam_simulate` is a first check (3-axis, from above), not a replacement.
 - Machine/material defaults belong in job templates
   (`cam_export_job_template`), not in ad-hoc values.
 

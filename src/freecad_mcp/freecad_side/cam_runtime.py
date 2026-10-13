@@ -86,6 +86,46 @@ OPERATION_INFO: dict[str, str] = {
     "Custom": "Literal G-code lines",
 }
 
+# Operations FreeCAD keeps in GUI modules without a Create(); they don't need the
+# GUI though. add_operation() runs the steps of FreeCAD's GUI command. "sources":
+# how many existing operations they take (source_operations).
+SPECIAL_OPERATIONS: dict[str, dict[str, str]] = {
+    "Comment": {
+        "gui": "Path.Op.Gui.Comment",
+        "cls": "Comment",
+        "vp": "_ViewProviderComment",
+        "sources": "none",
+        "info": "Comment line in the G-code (property Comment)",
+    },
+    "Stop": {
+        "gui": "Path.Op.Gui.Stop",
+        "cls": "Stop",
+        "vp": "_ViewProviderStop",
+        "sources": "none",
+        "info": "Program stop: Stop=Mandatory (M0) or Optional (M1)",
+    },
+    "Copy": {
+        "gui": "Path.Op.Gui.Copy",
+        "cls": "ObjectPathCopy",
+        "vp": "ViewProviderPathCopy",
+        "sources": "one",
+        "info": "Linked copy of one operation's path (follows changes)",
+    },
+    "Array": {
+        "gui": "Path.Op.Gui.Array",
+        "cls": "ObjectArray",
+        "vp": "ViewProviderArray",
+        "sources": "many",
+        "info": "Linear/polar/point array of operations with one tool controller",
+    },
+    "SimpleCopy": {
+        "model": "Path.Op.Custom",
+        "gui": "Path.Op.Gui.Custom",  # only for the view provider
+        "sources": "many",
+        "info": "Custom op holding a fixed G-code copy of operations",
+    },
+}
+
 # Dressups. "create": the module has a Create(base) that adds the dressup to the
 # job ("vp" names the GUI view provider class to attach, if Create doesn't).
 # "recipe": FreeCAD 1.1 has no Create() for these; their GUI command builds them
@@ -144,6 +184,22 @@ DRESSUPS: dict[str, dict[str, str]] = {
         "gui": "Path.Dressup.Gui.ZCorrect",
         "info": "Correct Z from a probe file",
     },
+    # new in FreeCAD 26.3
+    "Boundary2": {
+        "kind": "recipe",
+        "gui": "Path.Dressup.Gui.Boundary2",
+        "info": "Clip a path to a boundary (inside/outside, offset)",
+    },
+    "Mirror": {
+        "kind": "recipe",
+        "gui": "Path.Dressup.Gui.Mirror",
+        "info": "Mirror a path about X, Y or both",
+    },
+    "PlungeMilling": {
+        "kind": "recipe",
+        "gui": "Path.Dressup.Gui.PlungeMilling",
+        "info": "Replace a path by plunge cuts (step over, peck options)",
+    },
 }
 
 # Known FreeCAD CAM bugs the tools detect. We don't work around them: the
@@ -158,8 +214,8 @@ FREECAD_BUGS: dict[str, str] = {
     ),
     "dressup-gui-only": (
         "FreeCAD design issue: LeadInOut, RampEntry, Dragknife, AxisMap and ZCorrect "
-        "(plus Boundary2, Mirror, PlungeMilling on main) exist only in GUI modules "
-        "and have no headless Create(); they need the FreeCAD GUI."
+        "(plus Boundary2, Mirror, PlungeMilling since 26.3) exist only in GUI "
+        "modules and have no headless Create(); they need the FreeCAD GUI."
     ),
     "output-filename-subpart": (
         "FreeCAD bug: the output file pattern uses %T, %t, %W or %O, but this "
@@ -464,6 +520,9 @@ def _type_name(obj: Any) -> str:
     for name, (m, _g) in OPERATIONS.items():
         if mod == m:
             return name
+    for name, s in SPECIAL_OPERATIONS.items():
+        if mod == s["gui"] and "cls" in s:  # SimpleCopy is a Custom op
+            return name
     for name, d in DRESSUPS.items():
         if mod in (d.get("module"), d.get("gui")):
             return name
@@ -484,6 +543,15 @@ def capabilities(_args: dict[str, Any]) -> dict[str, Any]:
         entry: dict[str, Any] = {"type": name, "info": OPERATION_INFO.get(name, "")}
         try:
             importlib.import_module(mod)
+            entry["available"] = True
+        except Exception as e:
+            entry["available"] = False
+            entry["reason"] = str(e).splitlines()[0]
+        ops.append(entry)
+    for name, s in SPECIAL_OPERATIONS.items():
+        entry = {"type": name, "info": s["info"], "source_operations": s["sources"]}
+        try:
+            importlib.import_module(s.get("model") or s["gui"])
             entry["available"] = True
         except Exception as e:
             entry["available"] = False
@@ -569,6 +637,109 @@ def list_tools(args: dict[str, Any]) -> dict[str, Any]:
         )
     out["shapes"] = sorted(shapes)
     return out
+
+
+def _library_serializer(path: Any, for_import: bool) -> Any:
+    """FreeCAD's tool library serializer for a file extension."""
+    from Path.Tool.library.serializers import all_serializers
+
+    ext = path.suffix.lower()
+    flag = "can_import" if for_import else "can_export"
+    found = [s for s in all_serializers if ext in getattr(s, "extensions", ())]
+    usable = [s for s in found if getattr(s, flag, True)]
+    if not usable:
+        names = sorted(
+            e
+            for s in all_serializers
+            if getattr(s, flag, True)
+            for e in getattr(s, "extensions", ())
+        )
+        what = "import" if for_import else "export"
+        hint = f" (FreeCAD can't {what} {ext} files)" if found else ""
+        raise ValueError(f"Can't {what} {path.name}{hint}; formats: {names}")
+    return usable[0]
+
+
+def import_tool_library(args: dict[str, Any]) -> dict[str, Any]:
+    """Import a tool library file (and its bits) into FreeCAD's tool assets."""
+    from Path.Tool import cam_assets
+    from Path.Tool.library.models.library import Library
+
+    path = FsPath(args["file_path"])
+    if not path.is_file():
+        raise ValueError(f"No such file: {path}")
+    serializer = _library_serializer(path, for_import=True)
+    lib_id = args.get("library_id") or path.stem
+    lib_uri = f"toolbitlibrary://{lib_id}"
+    if cam_assets.exists(lib_uri) and not args.get("overwrite"):
+        raise ValueError(f"Library {lib_id!r} exists; pass overwrite or library_id")
+    data = path.read_bytes()
+    if hasattr(serializer, "deep_deserialize_with_context"):
+        # .fctl: finds bits in the stores or in a Bit/ folder next to Library/
+        loaded = serializer.deep_deserialize_with_context(data, path)
+    else:
+        loaded = serializer.deserialize(data, lib_id, {})
+    numbered = [(loaded.get_bit_no_from_bit(b), b) for b in loaded.get_bits()]
+    if not numbered:
+        raise ValueError(f"{path.name}: no tools found (missing bit files?)")
+    lib = Library(
+        args.get("label") or getattr(loaded, "label", "") or lib_id, id=lib_id
+    )
+    added, kept = [], []
+    for nr, bit in sorted(numbered, key=lambda nb: nb[0]):
+        if bit.get_id().startswith("camotics_tool_"):
+            # Camotics files number their bits camotics_tool_<n>: make them
+            # unique per library so a second import doesn't replace them
+            bit.id = f"{lib_id}_T{nr}"
+        bit_uri = f"toolbit://{bit.get_id()}"
+        if cam_assets.exists(bit_uri) and not args.get("overwrite"):
+            kept.append(bit.get_id())  # same bit already stored: reuse it
+        else:
+            cam_assets.add(bit)
+            added.append(bit.get_id())
+        lib.add_bit(bit, nr)
+    cam_assets.add(lib)
+    return {
+        "library": lib_id,
+        "label": lib.label,
+        "format": serializer.get_label(),
+        "tools": [
+            {"number": nr, "id": b.get_id(), "label": b.label}
+            for nr, b in sorted(
+                ((lib.get_bit_no_from_bit(b), b) for b in lib.get_bits()),
+                key=lambda nb: nb[0],
+            )
+        ],
+        "bits_added": added,
+        "bits_already_stored": kept,
+    }
+
+
+def export_tool_library(args: dict[str, Any]) -> dict[str, Any]:
+    """Write a tool library as .fctl, Camotics .json or LinuxCNC .tbl."""
+    from Path.Tool import cam_assets
+
+    path = FsPath(args["file_path"])
+    serializer = _library_serializer(path, for_import=False)
+    want = args["library"]
+    lib = next(
+        (
+            x
+            for x in cam_assets.fetch(asset_type="toolbitlibrary", depth=1)
+            if want in (x.get_id(), x.label)
+        ),
+        None,
+    )
+    if lib is None:
+        raise ValueError(f"No tool library {want!r} (id or label)")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(serializer.serialize(lib))
+    return {
+        "file": str(path),
+        "format": serializer.get_label(),
+        "library": lib.get_id(),
+        "tools": len(lib.get_bits()),
+    }
 
 
 def analyze_model(args: dict[str, Any]) -> dict[str, Any]:
@@ -706,6 +877,126 @@ def set_stock(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_AXES = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
+_ORIGIN_X = ("min", "max", "center", "keep")
+_ORIGIN_Z = ("top", "bottom", "center", "keep")
+
+
+def _models_bb(job: Any) -> Any:
+    bb = FreeCAD.BoundBox()
+    for m in job.Model.Group:
+        bb.add(m.Shape.BoundBox)
+    return bb
+
+
+def _rotation_for(args: dict[str, Any], job: Any, doc: Any) -> Any:
+    """The rotation place_model() applies: rotate {axis, angle} or face_up."""
+    rot = args.get("rotate")
+    face = args.get("face_up")
+    if rot and face:
+        raise ValueError("Pass either rotate or face_up, not both")
+    if rot:
+        axis = rot.get("axis", "z")
+        vec = FreeCAD.Vector(*(_AXES[axis.lower()] if isinstance(axis, str) else axis))
+        return FreeCAD.Rotation(vec, float(rot["angle"]))
+    if face:
+        clone = _link_sub_list(doc, job, [{"object": face["object"]}])[0][0]
+        sub = clone.Shape.getElement(face["face"])
+        if sub.ShapeType != "Face":
+            raise ValueError(f"{face['face']} is not a face")
+        u0, u1, v0, v1 = sub.ParameterRange
+        normal = sub.normalAt((u0 + u1) / 2, (v0 + v1) / 2)
+        if sub.Orientation == "Reversed":
+            normal = normal.negative()
+        return FreeCAD.Rotation(normal, FreeCAD.Vector(0, 0, 1))
+    return FreeCAD.Rotation()
+
+
+def place_model(args: dict[str, Any]) -> dict[str, Any]:
+    """Turn and move a job's model clones (e.g. flip for the second side)."""
+    import Draft
+
+    doc = _doc(args.get("doc_name"))
+    job = _job(doc, args.get("job_name"))
+    rot = _rotation_for(args, job, doc)
+    center = _models_bb(job).Center
+    stock = job.Stock
+    # stock from base (model bbox + margins) has the Ext* margin properties
+    from_base = stock is not None and hasattr(stock, "ExtXneg")
+    if not rot.isNull():
+        angle = math.degrees(rot.Angle)
+        for clone in job.Model.Group:  # as the Job dialog: around the bbox center
+            Draft.rotate(clone, angle, center, rot.Axis)
+        if stock is not None and not from_base:
+            Draft.rotate(stock, angle, center, rot.Axis)
+    doc.recompute()
+    origin = args.get("origin") or {}
+    bb = _models_bb(job)
+    move = FreeCAD.Vector(*(args.get("move") or [0, 0, 0]))
+    for key, lo, hi, choices in (
+        ("x", bb.XMin, bb.XMax, _ORIGIN_X),
+        ("y", bb.YMin, bb.YMax, _ORIGIN_X),
+        ("z", bb.ZMin, bb.ZMax, _ORIGIN_Z),
+    ):
+        how = origin.get(key, "keep")
+        if how not in choices:
+            raise ValueError(f"origin.{key} must be one of {choices}")
+        at = {"min": lo, "bottom": lo, "max": hi, "top": hi, "center": (lo + hi) / 2}
+        if how != "keep":
+            setattr(move, key, getattr(move, key) - at[how])
+    if move.Length > 0:
+        for clone in job.Model.Group:
+            Draft.move(clone, move)
+        if stock is not None and not from_base:
+            Draft.move(stock, move)
+    doc.recompute()
+    if from_base:
+        # a from-base stock only records the model position when it is created
+        set_stock(
+            {
+                "doc_name": doc.Name,
+                "job_name": job.Name,
+                "kind": "from_base",
+                "extent_neg": [
+                    _mm(stock.ExtXneg),
+                    _mm(stock.ExtYneg),
+                    _mm(stock.ExtZneg),
+                ],
+                "extent_pos": [
+                    _mm(stock.ExtXpos),
+                    _mm(stock.ExtYpos),
+                    _mm(stock.ExtZpos),
+                ],
+            }
+        )
+    doc.recompute()
+    bb = _models_bb(job)
+    sbb = job.Stock.Shape.BoundBox if job.Stock is not None else None
+    return {
+        "job": job.Name,
+        "rotation": {
+            "axis": _safe(rot.Axis),
+            "angle": round(math.degrees(rot.Angle), 6),
+        },
+        "move": _safe(move),
+        "model_bound_box": [
+            round(v, 4) for v in (bb.XMin, bb.XMax, bb.YMin, bb.YMax, bb.ZMin, bb.ZMax)
+        ],
+        "stock_bound_box": None
+        if sbb is None
+        else [
+            round(v, 4)
+            for v in (sbb.XMin, sbb.XMax, sbb.YMin, sbb.YMax, sbb.ZMin, sbb.ZMax)
+        ],
+        "stock": "recreated from base" if from_base else "moved with the model",
+        "operations_recomputed": [o.Label for o in job.Operations.Group],
+    }
+
+
+def _mm(q: Any) -> float:
+    return float(q.Value) if hasattr(q, "Value") else float(q)
+
+
 def _remove_tc(doc: Any, job: Any, tc: Any) -> None:
     users = [o.Label for o in tc.InList if _op_kind(o) == "operation"]
     if users:
@@ -789,11 +1080,78 @@ def remove_tool_controller(args: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _sources(doc: Any, job: Any, op_type: str, names: list[str] | None) -> list[Any]:
+    """Validated source operations for Copy, Array and SimpleCopy."""
+    want = SPECIAL_OPERATIONS[op_type]["sources"]
+    if want == "none":
+        if names:
+            raise ValueError(f"{op_type} takes no source_operations")
+        return []
+    srcs = [_obj(doc, n) for n in names or []]
+    if not srcs or (want == "one" and len(srcs) != 1):
+        n = "exactly one" if want == "one" else "at least one"
+        raise ValueError(f"{op_type} needs {n} operation in source_operations")
+    for s in srcs:
+        if not s.isDerivedFrom("Path::Feature") or s not in job.Operations.Group:
+            raise ValueError(f"{s.Label} is not a top-level operation of {job.Label}")
+    if op_type == "Array":
+        # the conditions of FreeCAD's Array command (IsActive)
+        from Path.Base import Util as PathUtil
+
+        tcs = {PathUtil.toolControllerForOp(s) for s in srcs}
+        if len(tcs) != 1 or None in tcs:
+            raise ValueError(
+                "Array: all source operations need the same tool controller"
+            )
+        if any(PathUtil.coolantModeForOp(s) != "None" for s in srcs):
+            raise ValueError("Array: FreeCAD only arrays operations with coolant None")
+    return srcs
+
+
+def _create_special_op(
+    doc: Any, job: Any, op_type: str, name: str, srcs: list[Any]
+) -> Any:
+    """Steps of FreeCAD's GUI command for the operations in SPECIAL_OPERATIONS."""
+    spec = SPECIAL_OPERATIONS[op_type]
+    if op_type == "SimpleCopy":
+        import Path.Op.Custom as PathCustom
+        from Path.Base import Util as PathUtil
+        from PathScripts import PathUtils
+
+        op = PathCustom.Create(name, parentJob=job)
+        op.ToolController = PathUtil.toolControllerForOp(srcs[0])
+        op.CoolantMode = PathUtil.coolantModeForOp(srcs[0])
+        paths = [PathUtils.getPathWithPlacement(s) for s in srcs]
+        op.Gcode = [c.toGCode() for p in paths for c in p.Commands]
+        _attach_op_vp(op, spec["gui"])
+        return op
+    gmod = importlib.import_module(spec["gui"])
+    op = doc.addObject("Path::FeaturePython", name)
+    getattr(gmod, spec["cls"])(op)
+    if spec["sources"] == "one":
+        op.Base = srcs[0]
+        if hasattr(srcs[0], "ToolController"):
+            op.ToolController = srcs[0].ToolController
+    elif spec["sources"] == "many":
+        op.Base = srcs
+    if _gui():
+        vp = getattr(gmod, spec["vp"])(op.ViewObject)
+        if op.ViewObject.Proxy is None:  # some view providers don't self-assign
+            op.ViewObject.Proxy = vp
+    job.Proxy.addOperation(op)
+    return op
+
+
 def add_operation(args: dict[str, Any]) -> dict[str, Any]:
     """Add an operation of any registered type to a job."""
     op_type = args["op_type"]
+    if op_type in SPECIAL_OPERATIONS:
+        return _add_special_operation(args)
     if op_type not in OPERATIONS:
-        raise ValueError(f"Unknown op_type {op_type!r}; known: {sorted(OPERATIONS)}")
+        known = sorted(OPERATIONS) + sorted(SPECIAL_OPERATIONS)
+        raise ValueError(f"Unknown op_type {op_type!r}; known: {known}")
+    if args.get("source_operations"):
+        raise ValueError(f"{op_type} takes no source_operations")
     mod_name, gui_name = OPERATIONS[op_type]
     mod = importlib.import_module(mod_name)
     doc = _doc(args.get("doc_name"))
@@ -830,6 +1188,36 @@ def add_operation(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _add_special_operation(args: dict[str, Any]) -> dict[str, Any]:
+    """add_operation() for Comment, Stop, Copy, Array and SimpleCopy."""
+    op_type = args["op_type"]
+    if args.get("tool_controller") or args.get("base") is not None:
+        raise ValueError(
+            f"{op_type} takes no tool_controller or base"
+            + (
+                "; it uses the source operations' tool controller"
+                if SPECIAL_OPERATIONS[op_type]["sources"] != "none"
+                else ""
+            )
+        )
+    doc = _doc(args.get("doc_name"))
+    job = _job(doc, args.get("job_name"))
+    srcs = _sources(doc, job, op_type, args.get("source_operations"))
+    op = _create_special_op(doc, job, op_type, args.get("name") or op_type, srcs)
+    if args.get("label"):
+        op.Label = args["label"]
+    report = _set_props(doc, job, op, args.get("properties"), args.get("expressions"))
+    doc.recompute()
+    return {
+        "name": op.Name,
+        "label": op.Label,
+        "type": op_type,
+        "sources": [s.Name for s in srcs],
+        "set": report,
+        "path": path_summary(op, job),
+    }
+
+
 def _create_dressup(dtype: str, base: Any, job: Any, doc: Any) -> Any:
     spec = DRESSUPS[dtype]
     if spec["kind"] == "create":
@@ -844,13 +1232,20 @@ def _create_dressup(dtype: str, base: Any, job: Any, doc: Any) -> Any:
             if dr.ViewObject.Proxy is None:  # some view providers don't self-assign
                 dr.ViewObject.Proxy = getattr(gmod, spec["vp"])(dr.ViewObject)
         return dr
-    # "recipe": exactly the steps of FreeCAD's own GUI command for this dressup
+    # "recipe": the steps of FreeCAD's own GUI command / Create() for this
+    # dressup, without its task panel and transaction
     if not _gui():
         raise ValueError(f"{dtype}: " + FREECAD_BUGS["dressup-gui-only"])
+    import inspect
+
     gmod = importlib.import_module(spec["gui"])
     dr = doc.addObject("Path::FeaturePython", f"{dtype}Dressup")
-    proxy = gmod.ObjectDressup(dr)
-    dr.Base = base
+    # ObjectDressup(obj, base) on 26.3 for most of them, ObjectDressup(obj) before
+    if len(inspect.signature(gmod.ObjectDressup).parameters) >= 2:
+        proxy = gmod.ObjectDressup(dr, base)
+    else:
+        proxy = gmod.ObjectDressup(dr)
+        dr.Base = base
     job.Proxy.addOperation(dr, base, True)
     if spec.get("setup"):
         proxy.setup(dr)
@@ -902,7 +1297,7 @@ def describe_type(args: dict[str, Any]) -> dict[str, Any]:
 
     kind = args.get("kind", "operation")
     tname = args["type"]
-    if kind == "operation" and tname not in OPERATIONS:
+    if kind == "operation" and tname not in OPERATIONS | SPECIAL_OPERATIONS:
         raise ValueError(f"Unknown operation {tname!r}")
     if kind == "dressup" and tname not in DRESSUPS:
         raise ValueError(f"Unknown dressup {tname!r}")
@@ -917,7 +1312,19 @@ def describe_type(args: dict[str, Any]) -> dict[str, Any]:
 
         job = PathJob.Create("Job", [box])
         doc.recompute()
-        if kind == "operation":
+        if kind == "operation" and tname in SPECIAL_OPERATIONS:
+            srcs = []
+            if SPECIAL_OPERATIONS[tname]["sources"] != "none":
+                import Path.Op.Profile as PathProfile
+
+                _select_only(job.Tools.Group[0])
+                try:
+                    srcs = [PathProfile.Create("Profile", parentJob=job)]
+                finally:
+                    _select_only(None)
+                doc.recompute()
+            obj = _create_special_op(doc, job, tname, tname, srcs)
+        elif kind == "operation":
             mod = importlib.import_module(OPERATIONS[tname][0])
             _select_only(job.Tools.Group[0])
             try:
@@ -1070,7 +1477,8 @@ def path_summary(  # noqa: PLR0912 - one pass over the commands, many cases
         ]
     warnings = []
     notes = []
-    if not cmds or not cut["Z"]:
+    # Comment and Stop have no tool controller and no moves by design
+    if (not cmds or not cut["Z"]) and "ToolController" in op.PropertiesList:
         warnings.append("no cutting moves (check Base, depths and tool controller)")
     if rapid_low and stock_top is not None:
         warnings.append(
@@ -1211,6 +1619,296 @@ def inspect_path(args: dict[str, Any]) -> dict[str, Any]:
         "name": obj.Name,
         "label": obj.Label,
         **path_summary(obj, job, int(args.get("gcode_lines", 0))),
+    }
+
+
+_MAX_CHECK_POINTS = 250_000
+
+
+def _sim_ops(job: Any, names: list[str] | None, doc: Any) -> list[Any]:
+    """Active operations with a tool, in job order (or the named ones)."""
+    from Path.Dressup import Utils as PathDressup
+
+    if names:
+        ops = [_obj(doc, n) for n in names]
+        missing = [o.Label for o in ops if o not in job.Operations.Group]
+        if missing:
+            raise ValueError(f"Not top-level operations of {job.Label}: {missing}")
+    else:
+        ops = list(job.Operations.Group)
+    out = []
+    for op in ops:
+        if not getattr(op, "Active", True) or getattr(op, "Path", None) is None:
+            continue
+        tc = PathDressup.toolController(op)
+        if tc is not None and tc.Tool is not None:
+            out.append((op, tc))
+    return out
+
+
+def _sim_arc(sim: Any, pos: Any, cmd: Any, ccw: bool, resolution: float) -> Any:
+    """An XY arc as short G1 moves (as FreeCAD's simulator does)."""
+    cx = pos.Base.x + (cmd.i or 0)
+    cy = pos.Base.y + (cmd.j or 0)
+    a0 = math.atan2(pos.Base.y - cy, pos.Base.x - cx)
+    da = math.atan2(cmd.y - cy, cmd.x - cx) - a0
+    da = da % (2 * math.pi) if ccw else -((-da) % (2 * math.pi))
+    r = math.hypot(cmd.i or 0, cmd.j or 0)
+    n = max(1, math.ceil(math.sqrt(r / resolution * da * da)))
+    da /= n
+    dz = (cmd.z - pos.Base.z) / n
+    cmd.Name = "G1"
+    for _k in range(n):
+        a0 += da
+        cmd.x = cx + r * math.cos(a0)
+        cmd.y = cy + r * math.sin(a0)
+        cmd.z = pos.Base.z + dz
+        pos = sim.ApplyCommand(pos, cmd)
+    return pos
+
+
+def _sim_drill(sim: Any, pos: Any, cmd: Any, first: bool) -> Any:
+    """A drill cycle as moves: (to R,) over the hole, down, back to R."""
+    import Path
+
+    steps = [Path.Command("G0", {"Z": cmd.r})] if first else []
+    steps.append(Path.Command("G0", {"X": cmd.x, "Y": cmd.y, "Z": cmd.r}))
+    steps.append(Path.Command("G1", {"X": cmd.x, "Y": cmd.y, "Z": cmd.z}))
+    steps.append(Path.Command("G1", {"X": cmd.x, "Y": cmd.y, "Z": cmd.r}))
+    for s in steps:
+        pos = sim.ApplyCommand(pos, s)
+    return pos
+
+
+def _sim_apply(sim: Any, pos: Any, commands: list[Any], resolution: float) -> Any:
+    """Feed one operation's commands to PathSim like FreeCAD's simulator.
+
+    XY arcs become short G1 moves, drill cycles become moves.
+    """
+    import Constants  # CAM's G-code name lists (Mod/CAM/Constants.py, 26.3+)
+
+    moves = Constants.GCODE_MOVE_RAPID + Constants.GCODE_MOVE_MILL
+    drills = Constants.GCODE_MOVE_DRILL + Constants.GCODE_DRILL_EXTENDED
+    first_drill = True
+    for i, cmd in enumerate(commands):
+        if cmd.Name in moves:
+            first_drill = True
+            arc = cmd.Name in Constants.GCODE_MOVE_ARC
+            j = i
+            while arc and cmd.z is None:  # arcs inherit Z from earlier moves
+                j -= 1
+                cmd.z = commands[j].z if j >= 0 else 0
+            if arc and (cmd.k or 0) == 0:
+                ccw = cmd.Name in Constants.GCODE_MOVE_CCW
+                pos = _sim_arc(sim, pos, cmd, ccw, resolution)
+            else:
+                pos = sim.ApplyCommand(pos, cmd)
+        if cmd.Name in Constants.GCODE_CYCLE_CANCEL:
+            first_drill = True
+        if cmd.Name in drills:
+            pos = _sim_drill(sim, pos, cmd, first_drill)
+            first_drill = False
+    return pos
+
+
+def _top_z(mesh: Any, x: float, y: float, z_from: float) -> float | None:
+    hit = mesh.nearestFacetOnRay((x, y, z_from), (0, 0, -1))
+    return next(iter(hit.values()))[2] if hit else None
+
+
+def _compare_with_model(
+    result: Any, job: Any, step: float, tol: float, z_from: float
+) -> dict[str, Any]:
+    """Compare the simulated top surface with the model's, seen from above."""
+    import MeshPart
+
+    gouges: list[tuple[float, float, float]] = []
+    left_max = 0.0
+    checked = 0
+    for model in job.Model.Group:
+        mesh = MeshPart.meshFromShape(Shape=model.Shape, LinearDeflection=step / 4)
+        mb = model.Shape.BoundBox
+        nx = int(mb.XLength / step)
+        ny = int(mb.YLength / step)
+        while nx * ny > _MAX_CHECK_POINTS:
+            step *= 1.25
+            nx, ny = int(mb.XLength / step), int(mb.YLength / step)
+        xs = [mb.XMin + (ix + 0.5) * step for ix in range(nx)]
+        ys = [mb.YMin + (iy + 0.5) * step for iy in range(ny)]
+        top = [[_top_z(mesh, x, y, z_from) for y in ys] for x in xs]
+        k = 2  # the voxel result is off by up to one cell at walls: keep 2 away
+        for ix, x in enumerate(xs):
+            for iy, y in enumerate(ys):
+                zm = top[ix][iy]
+                if zm is None:
+                    continue
+                around = [
+                    top[jx][jy] if 0 <= jx < nx and 0 <= jy < ny else None
+                    for jx, jy in (
+                        (ix + k, iy),
+                        (ix - k, iy),
+                        (ix, iy + k),
+                        (ix, iy - k),
+                    )
+                ]
+                if any(z is None or abs(z - zm) > tol for z in around):
+                    continue  # near the outline or a step of the model
+                checked += 1
+                zr = _top_z(result, x, y, z_from)
+                zr = job.Stock.Shape.BoundBox.ZMin if zr is None else zr
+                if zr < zm - tol:
+                    gouges.append((x, y, zm - zr))
+                else:
+                    left_max = max(left_max, zr - zm)
+    gouges.sort(key=lambda g: -g[2])
+    return {
+        "checked_points": checked,
+        "grid_step": round(step, 4),
+        "gouge": {
+            "found": bool(gouges),
+            "points": len(gouges),
+            "area_mm2": round(len(gouges) * step * step, 2),
+            "max_depth": round(gouges[0][2], 3) if gouges else 0.0,
+            "worst": [
+                {"x": round(x, 2), "y": round(y, 2), "depth": round(d, 3)}
+                for x, y, d in gouges[:10]
+            ],
+        },
+        "material_left_on_part_max": round(left_max, 3),
+    }
+
+
+def simulate(args: dict[str, Any]) -> dict[str, Any]:
+    """Cut the stock along the job's toolpaths (FreeCAD's voxel simulator)."""
+    import time
+
+    import Mesh
+    import PathSimulator
+    from PathScripts import PathUtils
+
+    doc = _doc(args.get("doc_name"))
+    job = _job(doc, args.get("job_name"))
+    if job.Stock is None:
+        raise ValueError(f"{job.Label} has no stock")
+    doc.recompute()
+    ops = _sim_ops(job, args.get("operations"), doc)
+    if not ops:
+        raise ValueError("No active operation with a tool controller to simulate")
+    stock = job.Stock.Shape
+    sb = stock.BoundBox
+    maxlen = max(sb.XLength, sb.YLength)
+    res = float(args.get("resolution") or min(0.5, max(0.05, maxlen / 400)))
+    t0 = time.time()
+    sim = PathSimulator.PathSim()
+    sim.BeginSimulation(stock, res)
+    rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 0)  # as FreeCAD's simulator
+    pos = FreeCAD.Placement(FreeCAD.Vector(0, 0, sb.ZMax), rot)
+    for op, tc in ops:
+        shape = tc.Tool.Shape
+        if shape.isNull() or not shape.isValid():
+            raise ValueError(f"Tool shape of {tc.Label} is invalid")
+        sim.SetToolShape(shape, 0.05 * res / (0.01 * maxlen))  # GUI: 0.05*accuracy
+        pos = _sim_apply(
+            sim, pos, list(PathUtils.getPathWithPlacement(op).Commands), res
+        )
+    outer, inner = sim.GetResultMesh()
+    result = Mesh.Mesh(outer)
+    result.addMesh(inner)
+    sim_time = time.time() - t0
+    out: dict[str, Any] = {
+        "operations": [op.Label for op, _tc in ops],
+        "resolution": round(res, 4),
+        "stock_volume": round(stock.Volume, 2),
+        "remaining_volume": round(result.Volume, 2),
+        "removed_volume": round(stock.Volume - result.Volume, 2),
+        "simulation_seconds": round(sim_time, 2),
+        "notes": [
+            "Voxel simulation seen from above: material is removed along Z only "
+            "(3-axis); feeds, tool holder and collisions are not simulated."
+        ],
+    }
+    if args.get("compare_with_model", True):
+        t1 = time.time()
+        out["model_check"] = _compare_with_model(result, job, res, res, sb.ZMax + 10.0)
+        out["model_check"]["seconds"] = round(time.time() - t1, 2)
+    if args.get("result_file"):
+        path = FsPath(args["result_file"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        result.write(str(path))
+        out["result_file"] = str(path)
+    if args.get("show_result"):
+        feat = doc.addObject("Mesh::Feature", "SimulationResult")
+        feat.Mesh = result
+        feat.Label = f"{job.Label} simulated stock"
+        out["result_object"] = feat.Name
+        if _gui() and job.Stock.ViewObject is not None:
+            job.Stock.ViewObject.Visibility = False
+        doc.recompute()
+    return out
+
+
+def check_job(args: dict[str, Any]) -> dict[str, Any]:
+    """FreeCAD's job check ("Sanity"): findings, summary, optional HTML report."""
+    import tempfile
+
+    from Path.Main.Sanity import ImageBuilder
+    from Path.Main.Sanity.Sanity import CAMSanity
+
+    doc = _doc(args.get("doc_name"))
+    job = _job(doc, args.get("job_name"))
+    doc.recompute()
+    report_file = args.get("report_file")
+    with tempfile.TemporaryDirectory() as tmp:
+        target = FsPath(report_file) if report_file else FsPath(tmp) / "report.html"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # built like CAMSanity.validate_job(); images (3D views of the GUI) only
+        # on request, the report then embeds them
+        sanity = object.__new__(CAMSanity)
+        sanity.job = job
+        sanity.output_file = str(target)
+        sanity.filelocation = str(target.parent)
+        sanity.image_builder = (
+            ImageBuilder.ImageBuilderFactory.get_image_builder(str(target.parent))
+            if args.get("images")
+            else ImageBuilder.DummyImageBuilder(str(target.parent))
+        )
+        sanity.data = sanity.summarize()
+        squawks, critical = sanity.get_all_squawks()
+        if report_file:
+            target.write_text(sanity.get_output_report(), encoding="utf-8")
+    run = sanity.data.get("runData", {})
+    findings = [
+        {
+            "level": s.get("squawkType"),
+            "message": s.get("Note"),
+            "source": s.get("Operator"),
+        }
+        for s in squawks
+    ]
+    return {
+        "job": job.Name,
+        "ok": not critical,
+        "critical": len(critical),
+        "findings": findings,
+        "summary": {
+            "cycle_time": run.get("cycletotal"),
+            "job_min_z": run.get("jobMinZ"),
+            "job_max_z": run.get("jobMaxZ"),
+            "operations": [
+                {
+                    k: _safe(v)
+                    for k, v in op.items()
+                    if k in ("opName", "minZ", "maxZ", "cycleTime", "coolantMode")
+                }
+                for op in run.get("operations", [])
+            ],
+            "stock": {
+                k: _safe(v)
+                for k, v in sanity.data.get("stockData", {}).items()
+                if k not in ("squawkData", "baseImage")
+            },
+        },
+        "report_file": str(target) if report_file else None,
     }
 
 

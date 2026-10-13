@@ -31,6 +31,8 @@ MODIFYING_TOOLS = {
     "cam_set_properties",
     "cam_set_operation_order",
     "cam_post_process",
+    "cam_simulate",
+    "cam_place_model",
 }
 
 READ_ONLY_TOOLS = {
@@ -42,11 +44,19 @@ READ_ONLY_TOOLS = {
     "cam_inspect_job",
     "cam_inspect_path",
     "cam_export_job_template",
+    "cam_check_job",
+    "cam_import_tool_library",
+    "cam_export_tool_library",
 }
 
 # Minimal valid arguments for every tool
 TOOL_ARGS: dict[str, dict[str, Any]] = {
     "cam_get_capabilities": {},
+    "cam_check_job": {},
+    "cam_simulate": {},
+    "cam_place_model": {"rotate": {"axis": "x", "angle": 180}},
+    "cam_import_tool_library": {"file_path": "/tmp/lib.fctl"},
+    "cam_export_tool_library": {"library": "Default", "file_path": "/tmp/x.tbl"},
     "cam_list_tool_library": {},
     "cam_analyze_model": {"object_name": "Part"},
     "cam_create_job": {"model_objects": ["Part"]},
@@ -235,6 +245,41 @@ class TestCamTools:
         assert "def _write_job_output(" in code
         assert "FilenameGenerator" in code
 
+    async def test_add_operation_passes_source_operations(
+        self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]
+    ) -> None:
+        tools, bridge = tools_and_bridge
+        await tools["cam_add_operation"](
+            op_type="Array", source_operations=["Profile", "Pocket"]
+        )
+        payload = _payload(bridge.execute_python.call_args.args[0])
+        assert payload["source_operations"] == ["Profile", "Pocket"]
+        assert "base" not in payload
+
+    async def test_simulate_runs_in_a_transaction(
+        self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]
+    ) -> None:
+        tools, bridge = tools_and_bridge
+        await tools["cam_simulate"](show_result=True, resolution=0.2)
+        code = bridge.execute_python.call_args.args[0]
+        assert _payload(code) == {
+            "compare_with_model": True,
+            "show_result": True,
+            "resolution": 0.2,
+        }
+        assert "openTransaction" in code
+
+
+def _literal(name: str) -> Any:
+    """A module-level literal assignment of the runtime, e.g. a registry."""
+    for node in ast.parse(cam._runtime_source()).body:
+        target = node.target if isinstance(node, ast.AnnAssign) else None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+        if isinstance(target, ast.Name) and target.id == name and node.value:
+            return ast.literal_eval(node.value)
+    raise KeyError(name)
+
 
 class TestRuntimeSource:
     """Static checks of the FreeCAD-side runtime (FreeCAD isn't importable here)."""
@@ -252,3 +297,19 @@ class TestRuntimeSource:
             if isinstance(t, ast.Name)
         }
         assert {"OPERATIONS", "DRESSUPS", "FREECAD_BUGS"} <= names
+
+    def test_special_operations_are_consistent(self) -> None:
+        special = _literal("SPECIAL_OPERATIONS")
+        assert set(special) == {"Comment", "Stop", "Copy", "Array", "SimpleCopy"}
+        assert not set(special) & set(_literal("OPERATIONS"))
+        for name, spec in special.items():
+            assert spec["sources"] in {"none", "one", "many"}, name
+            assert spec["gui"].startswith("Path.Op.Gui."), name
+            # all but SimpleCopy (a Custom op) are built from a GUI-module class
+            assert ("cls" in spec and "vp" in spec) or name == "SimpleCopy", name
+
+    def test_gui_only_dressups_are_recipes(self) -> None:
+        dressups = _literal("DRESSUPS")
+        for name in ("Boundary2", "Mirror", "PlungeMilling"):
+            assert dressups[name]["kind"] == "recipe"
+            assert dressups[name]["gui"] == f"Path.Dressup.Gui.{name}"
