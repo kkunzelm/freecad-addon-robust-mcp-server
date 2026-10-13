@@ -1711,55 +1711,86 @@ def _sim_apply(sim: Any, pos: Any, commands: list[Any], resolution: float) -> An
     return pos
 
 
-def _top_z(mesh: Any, x: float, y: float, z_from: float) -> float | None:
-    hit = mesh.nearestFacetOnRay((x, y, z_from), (0, 0, -1))
-    return next(iter(hit.values()))[2] if hit else None
+def _height_grid(mesh: Any, x0: float, y0: float, step: float, nx: int, ny: int) -> Any:
+    """Highest Z of a mesh above each grid point (NaN where nothing is).
+
+    Grid point (i, j) is at (x0 + i*step, y0 + j*step). Each triangle is
+    rasterized once, so the cost grows with the triangle count, not with
+    triangles x points (as a ray test per point would).
+    """
+    import numpy as np
+
+    grid = np.full((nx, ny), np.nan)
+    points, facets = mesh.Topology
+    if not facets:
+        return grid
+    p = np.array([[v.x, v.y, v.z] for v in points])
+    for a, b, c in facets:
+        t = p[[a, b, c]]
+        (xa, ya, za), (xb, yb, zb), (xc, yc, zc) = t
+        det = (yb - yc) * (xa - xc) + (xc - xb) * (ya - yc)
+        if abs(det) < 1e-12:  # vertical wall: invisible from above
+            continue
+        i0 = max(0, int(np.ceil((t[:, 0].min() - x0) / step - 1e-9)))
+        i1 = min(nx - 1, int(np.floor((t[:, 0].max() - x0) / step + 1e-9)))
+        j0 = max(0, int(np.ceil((t[:, 1].min() - y0) / step - 1e-9)))
+        j1 = min(ny - 1, int(np.floor((t[:, 1].max() - y0) / step + 1e-9)))
+        if i0 > i1 or j0 > j1:
+            continue
+        gx, gy = np.meshgrid(
+            x0 + np.arange(i0, i1 + 1) * step,
+            y0 + np.arange(j0, j1 + 1) * step,
+            indexing="ij",
+        )
+        la = ((yb - yc) * (gx - xc) + (xc - xb) * (gy - yc)) / det
+        lb = ((yc - ya) * (gx - xc) + (xa - xc) * (gy - yc)) / det
+        lc = 1.0 - la - lb
+        inside = (la >= -1e-9) & (lb >= -1e-9) & (lc >= -1e-9)
+        if not inside.any():
+            continue
+        z = np.where(inside, la * za + lb * zb + lc * zc, np.nan)
+        sub = grid[i0 : i1 + 1, j0 : j1 + 1]
+        grid[i0 : i1 + 1, j0 : j1 + 1] = np.fmax(sub, z)
+    return grid
 
 
 def _compare_with_model(
-    result: Any, job: Any, step: float, tol: float, z_from: float
+    result: Any, job: Any, step: float, tol: float
 ) -> dict[str, Any]:
     """Compare the simulated top surface with the model's, seen from above."""
     import MeshPart
+    import numpy as np
 
     gouges: list[tuple[float, float, float]] = []
     left_max = 0.0
     checked = 0
+    stock_bottom = job.Stock.Shape.BoundBox.ZMin
     for model in job.Model.Group:
         mesh = MeshPart.meshFromShape(Shape=model.Shape, LinearDeflection=step / 4)
         mb = model.Shape.BoundBox
-        nx = int(mb.XLength / step)
-        ny = int(mb.YLength / step)
+        nx, ny = int(mb.XLength / step), int(mb.YLength / step)
         while nx * ny > _MAX_CHECK_POINTS:
             step *= 1.25
             nx, ny = int(mb.XLength / step), int(mb.YLength / step)
-        xs = [mb.XMin + (ix + 0.5) * step for ix in range(nx)]
-        ys = [mb.YMin + (iy + 0.5) * step for iy in range(ny)]
-        top = [[_top_z(mesh, x, y, z_from) for y in ys] for x in xs]
-        k = 2  # the voxel result is off by up to one cell at walls: keep 2 away
-        for ix, x in enumerate(xs):
-            for iy, y in enumerate(ys):
-                zm = top[ix][iy]
-                if zm is None:
-                    continue
-                around = [
-                    top[jx][jy] if 0 <= jx < nx and 0 <= jy < ny else None
-                    for jx, jy in (
-                        (ix + k, iy),
-                        (ix - k, iy),
-                        (ix, iy + k),
-                        (ix, iy - k),
-                    )
-                ]
-                if any(z is None or abs(z - zm) > tol for z in around):
-                    continue  # near the outline or a step of the model
-                checked += 1
-                zr = _top_z(result, x, y, z_from)
-                zr = job.Stock.Shape.BoundBox.ZMin if zr is None else zr
-                if zr < zm - tol:
-                    gouges.append((x, y, zm - zr))
-                else:
-                    left_max = max(left_max, zr - zm)
+        x0, y0 = mb.XMin + step / 2, mb.YMin + step / 2
+        top = _height_grid(mesh, x0, y0, step, nx, ny)
+        cut = _height_grid(result, x0, y0, step, nx, ny)
+        cut = np.where(np.isnan(cut), stock_bottom, cut)  # cut through
+        # judge only points whose neighbours 2 cells away lie on the same
+        # model surface: the voxel result is off by up to one cell at walls
+        k = 2
+        pad = np.pad(top, k, constant_values=np.nan)
+        ok = ~np.isnan(top)
+        for dx, dy in ((k, 0), (-k, 0), (0, k), (0, -k)):
+            near = pad[k + dx : k + dx + nx, k + dy : k + dy + ny]
+            ok &= ~np.isnan(near) & (np.abs(near - top) <= tol)
+        checked += int(ok.sum())
+        diff = np.where(ok, top - cut, np.nan)
+        for ix, iy in zip(*np.nonzero(diff > tol), strict=True):
+            gouges.append((x0 + ix * step, y0 + iy * step, float(diff[ix, iy])))
+        left = np.where(ok, cut - top, np.nan)
+        if ok.any():
+            left_max = max(left_max, float(np.nanmax(left)))
     gouges.sort(key=lambda g: -g[2])
     return {
         "checked_points": checked,
@@ -1774,7 +1805,7 @@ def _compare_with_model(
                 for x, y, d in gouges[:10]
             ],
         },
-        "material_left_on_part_max": round(left_max, 3),
+        "material_left_on_part_max": round(max(left_max, 0.0), 3),
     }
 
 
@@ -1829,7 +1860,7 @@ def simulate(args: dict[str, Any]) -> dict[str, Any]:
     }
     if args.get("compare_with_model", True):
         t1 = time.time()
-        out["model_check"] = _compare_with_model(result, job, res, res, sb.ZMax + 10.0)
+        out["model_check"] = _compare_with_model(result, job, res, res)
         out["model_check"]["seconds"] = round(time.time() - t1, 2)
     if args.get("result_file"):
         path = FsPath(args["result_file"])
