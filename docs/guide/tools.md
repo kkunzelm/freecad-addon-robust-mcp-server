@@ -431,6 +431,10 @@ type with defaults and allowed values.
 
 Always check generated G-code in a simulator before running it on a machine.
 
+`cam_post_process(use_job_output=True)` writes the files where FreeCAD's Post
+Process command would, named by the job's output pattern
+(`Job.PostProcessorOutputFile`, e.g. `%D/%S-%t-%d.nc`).
+
 ---
 
 ## Macro Tools

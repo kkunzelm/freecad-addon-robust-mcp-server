@@ -225,6 +225,16 @@ class TestCamTools:
         assert payload["type"] == "Tags"
         assert payload["kind"] == "dressup"
 
+    async def test_post_process_passes_use_job_output(
+        self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]
+    ) -> None:
+        tools, bridge = tools_and_bridge
+        await tools["cam_post_process"](use_job_output=True)
+        code = bridge.execute_python.call_args.args[0]
+        assert _payload(code)["use_job_output"] is True
+        assert "def _write_job_output(" in code
+        assert "FilenameGenerator" in code
+
 
 class TestRuntimeSource:
     """Static checks of the FreeCAD-side runtime (FreeCAD isn't importable here)."""

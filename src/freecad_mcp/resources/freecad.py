@@ -1406,7 +1406,12 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         {
                             "name": "cam_create_job",
                             "description": "Create a CAM job (no dialog), optional template, model offset, stock",
-                            "key_params": ["model_objects", "template", "model_offset", "stock"],
+                            "key_params": [
+                                "model_objects",
+                                "template",
+                                "model_offset",
+                                "stock",
+                            ],
                         },
                         {
                             "name": "cam_set_stock",
@@ -1416,7 +1421,13 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         {
                             "name": "cam_add_tool_controller",
                             "description": "Add tool bit (library, file or shape) with speeds and feeds",
-                            "key_params": ["tool", "tool_number", "spindle_speed", "horiz_feed", "vert_feed"],
+                            "key_params": [
+                                "tool",
+                                "tool_number",
+                                "spindle_speed",
+                                "horiz_feed",
+                                "vert_feed",
+                            ],
                         },
                         {
                             "name": "cam_remove_tool_controller",
@@ -1426,12 +1437,22 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         {
                             "name": "cam_add_operation",
                             "description": "Add any CAM operation (Profile, Pocket, Adaptive, Drilling, Helix, ...)",
-                            "key_params": ["op_type", "tool_controller", "base", "properties"],
+                            "key_params": [
+                                "op_type",
+                                "tool_controller",
+                                "base",
+                                "properties",
+                            ],
                         },
                         {
                             "name": "cam_add_dressup",
                             "description": "Add a dressup (Tags, Boundary, Dogbone, LeadInOut, RampEntry, ...)",
-                            "key_params": ["dressup_type", "base_operation", "properties", "tag_count"],
+                            "key_params": [
+                                "dressup_type",
+                                "base_operation",
+                                "properties",
+                                "tag_count",
+                            ],
                         },
                         {
                             "name": "cam_describe_type",
@@ -1466,7 +1487,11 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         {
                             "name": "cam_post_process",
                             "description": "Post-process to G-code without dialogs, write file",
-                            "key_params": ["post_processor", "output_file"],
+                            "key_params": [
+                                "post_processor",
+                                "output_file",
+                                "use_job_output",
+                            ],
                         },
                         {
                             "name": "cam_export_job_template",

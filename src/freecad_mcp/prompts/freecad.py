@@ -370,6 +370,8 @@ If boolean fails:
 6. `cam_add_dressup("Tags", base_operation, tag_count=4)` etc.
 7. `cam_inspect_job()` - check every path summary: warnings and notes
 8. `cam_post_process(post_processor="linuxcnc", output_file=...)`
+   (or `use_job_output=True`: folder and file names from the job's output
+   pattern, the same names FreeCAD's Post Process command writes)
 
 ## Options
 - `cam_describe_type(type_name, kind)` lists every option with defaults,

@@ -161,6 +161,13 @@ FREECAD_BUGS: dict[str, str] = {
         "(plus Boundary2, Mirror, PlungeMilling on main) exist only in GUI modules "
         "and have no headless Create(); they need the FreeCAD GUI."
     ),
+    "output-filename-subpart": (
+        "FreeCAD bug: the output file pattern uses %T, %t, %W or %O, but this "
+        "FreeCAD's FilenameGenerator replaces them before it knows the section, "
+        'so "%S-%t-%d" gives "0--Doc-T1-Tool.nc". Fixed on main in 91ad168ea4 '
+        "(issue #31758); needs a FreeCAD version that contains that fix, or an "
+        "output pattern without these substitutions."
+    ),
 }
 
 STOCK_KINDS = ("from_base", "box", "cylinder")
@@ -1203,22 +1210,15 @@ def post_process(args: dict[str, Any]) -> dict[str, Any]:
             "Post processor returned nothing (argument error? see the FreeCAD report view)"
         )
     output = args.get("output_file")
-    files = []
-    if output:
-        out_path = FsPath(output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        if len(sections) == 1 or not args.get("split_files", True):
-            out_path.write_text("".join(g for _n, g in sections if g))
-            files.append(str(out_path))
-        else:
-            for name, g in sections:
-                path = (
-                    out_path.with_name(f"{out_path.stem}_{name}{out_path.suffix}")
-                    if name
-                    else out_path
-                )
-                path.write_text(g or "")
-                files.append(str(path))
+    files: list[str] = []
+    if args.get("use_job_output"):
+        if output:
+            raise ValueError("Pass either output_file or use_job_output, not both")
+        files = _write_job_output(job, sections)
+    elif output:
+        files = _write_output_file(
+            FsPath(output), sections, args.get("split_files", True)
+        )
     gcode = "".join(g for _n, g in sections if g)
     out: dict[str, Any] = {
         "post_processor": job.PostProcessor,
@@ -1234,6 +1234,66 @@ def post_process(args: dict[str, Any]) -> dict[str, Any]:
         out["gcode"] = lines[:max_lines]
         out["gcode_truncated"] = len(lines) > max_lines
     return out
+
+
+def _write_output_file(out_path: Any, sections: list[Any], split: bool) -> list[str]:
+    """Write to the given file, or one <name>_<section> file per section."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(sections) == 1 or not split:
+        out_path.write_text("".join(g for _n, g in sections if g))
+        return [str(out_path)]
+    files = []
+    for name, g in sections:
+        path = (
+            out_path.with_name(f"{out_path.stem}_{name}{out_path.suffix}")
+            if name
+            else out_path
+        )
+        path.write_text(g or "")
+        files.append(str(path))
+    return files
+
+
+def _write_job_output(job: Any, sections: list[Any]) -> list[str]:
+    """Write the sections where FreeCAD's Post Process command would.
+
+    Uses FreeCAD's FilenameGenerator with the job's output pattern
+    (Job.PostProcessorOutputFile), so the names match the GUI. Existing files
+    are overwritten.
+    """
+    import re
+
+    from Path.Post.Utils import FilenameGenerator
+
+    generator = FilenameGenerator(job=job)
+    if re.search(r"%[TtWO]", job.PostProcessorOutputFile or "") and not hasattr(
+        generator, "filename_template"
+    ):
+        raise RuntimeError(FREECAD_BUGS["output-filename-subpart"])
+    names = generator.generate_filenames()
+    files = []
+    for subpart, gcode in sections:
+        if gcode is None:  # the post processor asked for no file
+            continue
+        generator.set_subpartname("" if subpart == "allitems" else subpart)
+        path = FsPath(next(names))
+        if not path.is_absolute():
+            raise ValueError(
+                f"The job's output pattern {job.PostProcessorOutputFile!r} gives the "
+                f"relative path {str(path)!r} (an unsaved document has no folder "
+                "for %D); save the document or pass output_file"
+            )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # line ends as in FreeCAD's Post Process command: a leading "\n\n" or a
+        # "\r" means write unchanged, otherwise "\n" becomes the system's line end
+        if gcode.startswith("\n\n"):
+            path.write_text(gcode[2:], newline="")
+        elif "\r" in gcode:
+            path.write_text(gcode, newline="")
+        else:
+            path.write_text(gcode)
+        files.append(str(path))
+    return files
 
 
 def export_job_template(args: dict[str, Any]) -> dict[str, Any]:

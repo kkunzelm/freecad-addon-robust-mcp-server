@@ -612,6 +612,7 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
         post_args: str | None = None,
         output_file: str | None = None,
         split_files: bool = True,
+        use_job_output: bool = False,
         return_lines: int = 0,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
@@ -629,6 +630,12 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
             output_file: File to write. Nothing is written if None.
             split_files: When the job splits its output (Job.SplitOutput),
                 write one file per section as <name>_<section><ext>.
+            use_job_output: Write the files exactly where FreeCAD's Post
+                Process command would: folder and names from the job's output
+                pattern (Job.PostProcessorOutputFile, e.g. "%D/%S-%t-%d.nc"),
+                one file per section when the job splits its output. Existing
+                files are overwritten. Not together with output_file. Needs a
+                saved document when the pattern uses %D.
             return_lines: Also return up to this many G-code lines.
             doc_name: Document. Uses the active document if None.
 
@@ -644,6 +651,7 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
                 "post_args": post_args,
                 "output_file": output_file,
                 "split_files": split_files,
+                "use_job_output": use_job_output,
                 "return_lines": return_lines,
                 "doc_name": doc_name,
             },
