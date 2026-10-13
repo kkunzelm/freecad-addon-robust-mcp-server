@@ -1206,6 +1206,7 @@ def post_process(args: dict[str, Any]) -> dict[str, Any]:
     files = []
     if output:
         out_path = FsPath(output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         if len(sections) == 1 or not args.get("split_files", True):
             out_path.write_text("".join(g for _n, g in sections if g))
             files.append(str(out_path))
@@ -1262,8 +1263,9 @@ def export_job_template(args: dict[str, Any]) -> dict[str, Any]:
     if args.get("include_stock", True) and job.Stock is not None:
         attrs[PathJob.JobTemplate.Stock] = PathStock.TemplateAttributes(job.Stock)
     if args.get("include_setup_sheet", True):
+        # The fifth argument is a list of operation names, not a bool.
         attrs[PathJob.JobTemplate.SetupSheet] = job.SetupSheet.Proxy.templateAttributes(
-            True, True, True, True, True
+            True, True, True, True, None
         )
     path.write_text(json.dumps(attrs, sort_keys=True, indent=2))
     return {"file": str(path), "keys": sorted(attrs)}
