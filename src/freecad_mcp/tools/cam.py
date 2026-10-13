@@ -114,8 +114,11 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
 
         Returns:
             Dictionary with freecad_version, gui, operations, dressups,
-            stock_kinds, post_processors, job_templates, default_job_template,
-            asset_path, freecad_home, local_patches, known_freecad_issues.
+            stock_kinds, post_processors (Job.PostProcessor choices; legacy
+            ones on 26.3+), machine_post_processors and machines (26.3+, a
+            job uses them through its Machine property), job_templates,
+            default_job_template, asset_path, freecad_home, local_patches,
+            known_freecad_issues.
         """
         return await run("capabilities", {})
 
@@ -618,15 +621,21 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
     ) -> dict[str, Any]:
         """Post-process a job to G-code and optionally write it to a file.
 
-        "--no-show-editor" is always added, so FreeCAD never opens its G-code
-        editor dialog. Check generated G-code in a simulator before running it
-        on a machine.
+        If the job names a machine (Job.Machine, FreeCAD 26.3+), the machine
+        definition (.fcm in CamAssets/Machines) selects the post processor
+        and holds its options, as in FreeCAD's Post Process command; then
+        post_processor and post_args must not be given. Otherwise the job's
+        legacy post processor runs with "--no-show-editor" added. No dialog
+        opens in either case. Check generated G-code in a simulator before
+        running it on a machine.
 
         Args:
             job_name: Job. Optional if the document has exactly one job.
-            post_processor: Post processor name, e.g. "linuxcnc", "grbl". The
-                job's setting if None (see cam_get_capabilities).
-            post_args: Post processor arguments (replaces the job's setting).
+            post_processor: Legacy post processor name, e.g. "linuxcnc_legacy"
+                (see cam_get_capabilities). The job's setting if None. Not
+                allowed for jobs with a machine.
+            post_args: Legacy post processor arguments (replaces the job's
+                setting). Not allowed for jobs with a machine.
             output_file: File to write. Nothing is written if None.
             split_files: When the job splits its output (Job.SplitOutput),
                 write one file per section as <name>_<section><ext>.
@@ -640,8 +649,8 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
             doc_name: Document. Uses the active document if None.
 
         Returns:
-            Dictionary with post_processor, args, sections, lines, files,
-            cycle_time and optionally gcode.
+            Dictionary with machine, post_processor, args, sections, lines,
+            files, cycle_time and optionally gcode.
         """
         return await run(
             "post_process",

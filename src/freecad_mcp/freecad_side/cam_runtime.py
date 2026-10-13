@@ -221,6 +221,34 @@ def _job(doc: Any, name: str | None) -> Any:
     return jobs[0]
 
 
+def _machine(name: str) -> Any:
+    """The machine definition (.fcm) a job names (FreeCAD 26.3+)."""
+    from Machine.models.machine import MachineFactory
+
+    try:
+        return MachineFactory.get_machine(name)
+    except FileNotFoundError as e:
+        raise ValueError(
+            f"Machine {name!r} not found in {MachineFactory.get_config_directory()}"
+        ) from e
+
+
+def _list_machines() -> list[dict[str, Any]] | None:
+    """Machines in the CAM asset folder; None before FreeCAD 26.3."""
+    try:
+        from Machine.models.machine import MachineFactory
+    except ImportError:
+        return None
+    out = []
+    for name in MachineFactory.list_configurations():
+        try:
+            m = MachineFactory.get_machine(name)
+            out.append({"name": m.name, "post_processor": m.postprocessor_file_name})
+        except Exception as e:
+            out.append({"name": name, "error": str(e)})
+    return out
+
+
 def _is_job(obj: Any) -> bool:
     import Path.Main.Job as PathJob
 
@@ -482,6 +510,12 @@ def capabilities(_args: dict[str, Any]) -> dict[str, Any]:
         "dressups": dressups,
         "stock_kinds": list(STOCK_KINDS),
         "post_processors": sorted(Prefs.allEnabledPostProcessors()),
+        # 26.3+: new-style posts are only reachable through a machine (Job.Machine),
+        # Job.PostProcessor lists the legacy ones
+        "machine_post_processors": sorted(Prefs.allEnabledMachinePostProcessors())
+        if hasattr(Prefs, "allEnabledMachinePostProcessors")
+        else None,
+        "machines": _list_machines(),
         "job_templates": templates,
         "default_job_template": Prefs.defaultJobTemplate() or None,
         "asset_path": str(Prefs.getAssetPath()),
@@ -1158,6 +1192,7 @@ def inspect_job(args: dict[str, Any]) -> dict[str, Any]:
             and not p.startswith("_")
             and "Hidden" not in ss.getPropertyStatus(p)
         },
+        "machine": getattr(job, "Machine", None) or None,
         "post_processor": job.PostProcessor,
         "post_processor_args": job.PostProcessorArgs,
         "post_processor_output_file": job.PostProcessorOutputFile,
@@ -1190,39 +1225,33 @@ def post_process(args: dict[str, Any]) -> dict[str, Any]:
 
     doc = _doc(args.get("doc_name"))
     job = _job(doc, args.get("job_name"))
-    if args.get("post_processor"):
-        job.PostProcessor = args["post_processor"]
-    if not job.PostProcessor:
-        raise ValueError("No post processor set on the job; pass post_processor")
-    post_args = args.get("post_args")
-    if post_args is not None:
-        job.PostProcessorArgs = post_args
-    # legacy posts open a modal G-code editor in the GUI unless told otherwise
-    if "--no-show-editor" not in job.PostProcessorArgs:
-        job.PostProcessorArgs = (job.PostProcessorArgs + " --no-show-editor").strip()
+    machine_name, post_name = _select_post(job, args)
     doc.recompute()
-    post = PostProcessorFactory.get_post_processor(job, job.PostProcessor)
-    if post is None:
-        raise ValueError(f"Post processor {job.PostProcessor!r} could not be loaded")
-    sections = post.export()
-    if sections is None:
+    post = PostProcessorFactory.get_post_processor(job, post_name)
+    if post is None or not hasattr(post, "export"):  # 26.3 returns a CAMError
+        raise ValueError(f"Post processor {post_name!r} could not be loaded: {post}")
+    # export2() is the machine flow; it never opens a dialog
+    sections = post.export2() if machine_name else post.export()
+    if not sections:
         raise ValueError(
             "Post processor returned nothing (argument error? see the FreeCAD report view)"
         )
+    extension = post.get_file_extension() if machine_name else None
     output = args.get("output_file")
     files: list[str] = []
     if args.get("use_job_output"):
         if output:
             raise ValueError("Pass either output_file or use_job_output, not both")
-        files = _write_job_output(job, sections)
+        files = _write_job_output(job, sections, extension)
     elif output:
         files = _write_output_file(
             FsPath(output), sections, args.get("split_files", True)
         )
     gcode = "".join(g for _n, g in sections if g)
     out: dict[str, Any] = {
-        "post_processor": job.PostProcessor,
-        "args": job.PostProcessorArgs,
+        "machine": machine_name or None,
+        "post_processor": post_name,
+        "args": None if machine_name else job.PostProcessorArgs,
         "sections": [n for n, _g in sections],
         "lines": gcode.count("\n"),
         "files": files,
@@ -1234,6 +1263,34 @@ def post_process(args: dict[str, Any]) -> dict[str, Any]:
         out["gcode"] = lines[:max_lines]
         out["gcode_truncated"] = len(lines) > max_lines
     return out
+
+
+def _select_post(job: Any, args: dict[str, Any]) -> tuple[str, str]:
+    """(machine name or "", post processor name) for a post_process call."""
+    machine_name = getattr(job, "Machine", "")  # FreeCAD 26.3+
+    if machine_name:
+        # machine flow: the machine names the post processor and holds its
+        # options; Job.PostProcessor/PostProcessorArgs are not used
+        if args.get("post_processor") or args.get("post_args") is not None:
+            raise ValueError(
+                f"Job {job.Label} uses machine {machine_name!r}, which sets the post "
+                "processor and its options; change the machine (or clear "
+                "Job.Machine) instead of passing post_processor/post_args"
+            )
+        post_name = _machine(machine_name).postprocessor_file_name
+        if not post_name:
+            raise ValueError(f"Machine {machine_name!r} names no post processor")
+        return machine_name, post_name
+    if args.get("post_processor"):
+        job.PostProcessor = args["post_processor"]
+    if not job.PostProcessor:
+        raise ValueError("No post processor set on the job; pass post_processor")
+    if args.get("post_args") is not None:
+        job.PostProcessorArgs = args["post_args"]
+    # legacy posts open a modal G-code editor in the GUI unless told otherwise
+    if "--no-show-editor" not in job.PostProcessorArgs:
+        job.PostProcessorArgs = (job.PostProcessorArgs + " --no-show-editor").strip()
+    return "", job.PostProcessor
 
 
 def _write_output_file(out_path: Any, sections: list[Any], split: bool) -> list[str]:
@@ -1254,18 +1311,25 @@ def _write_output_file(out_path: Any, sections: list[Any], split: bool) -> list[
     return files
 
 
-def _write_job_output(job: Any, sections: list[Any]) -> list[str]:
+def _write_job_output(
+    job: Any, sections: list[Any], extension: str | None = None
+) -> list[str]:
     """Write the sections where FreeCAD's Post Process command would.
 
     Uses FreeCAD's FilenameGenerator with the job's output pattern
-    (Job.PostProcessorOutputFile), so the names match the GUI. Existing files
-    are overwritten.
+    (Job.PostProcessorOutputFile), so the names match the GUI. In the machine
+    flow the post processor's file extension replaces the pattern's, as in
+    FreeCAD. Existing files are overwritten.
     """
     import re
 
     from Path.Post.Utils import FilenameGenerator
 
-    generator = FilenameGenerator(job=job)
+    generator = (
+        FilenameGenerator(job=job, file_extension=extension)
+        if extension
+        else FilenameGenerator(job=job)
+    )
     if re.search(r"%[TtWO]", job.PostProcessorOutputFile or "") and not hasattr(
         generator, "filename_template"
     ):
