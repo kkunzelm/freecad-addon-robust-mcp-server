@@ -25,6 +25,7 @@ MODIFYING_TOOLS = {
     "cam_create_job",
     "cam_set_stock",
     "cam_add_tool_controller",
+    "cam_feeds_speeds",
     "cam_remove_tool_controller",
     "cam_add_operation",
     "cam_add_dressup",
@@ -62,6 +63,7 @@ TOOL_ARGS: dict[str, dict[str, Any]] = {
     "cam_create_job": {"model_objects": ["Part"]},
     "cam_set_stock": {},
     "cam_add_tool_controller": {"tool": {"shape": "endmill"}},
+    "cam_feeds_speeds": {},
     "cam_remove_tool_controller": {"tool_controller": "TC"},
     "cam_add_operation": {"op_type": "Profile"},
     "cam_add_dressup": {"dressup_type": "Tags", "base_operation": "Profile"},
@@ -255,6 +257,36 @@ class TestCamTools:
         payload = _payload(bridge.execute_python.call_args.args[0])
         assert payload["source_operations"] == ["Profile", "Pocket"]
         assert "base" not in payload
+
+    async def test_set_stock_material_only_sends_no_kind(
+        self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]
+    ) -> None:
+        tools, bridge = tools_and_bridge
+        await tools["cam_set_stock"](material="KHK Stahl 1.2842")
+        payload = _payload(bridge.execute_python.call_args.args[0])
+        assert payload == {"material": "KHK Stahl 1.2842"}
+
+    async def test_add_tool_controller_uses_presets_by_default(
+        self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]
+    ) -> None:
+        tools, bridge = tools_and_bridge
+        await tools["cam_add_tool_controller"](
+            tool={"library_bit": "khk_inox_d6"}, op_type="profile"
+        )
+        payload = _payload(bridge.execute_python.call_args.args[0])
+        assert payload["feeds_speeds"] == "preset"
+        assert payload["op_type"] == "profile"
+
+    async def test_feeds_speeds_passes_apply(
+        self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]
+    ) -> None:
+        tools, bridge = tools_and_bridge
+        await tools["cam_feeds_speeds"](tool_controllers=["TC_17"], apply=True)
+        code = bridge.execute_python.call_args.args[0]
+        payload = _payload(code)
+        assert payload["apply"] is True
+        assert payload["tool_controllers"] == ["TC_17"]
+        assert "write_result_to_tc" in code
 
     async def test_simulate_runs_in_a_transaction(
         self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]

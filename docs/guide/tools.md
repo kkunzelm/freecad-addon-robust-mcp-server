@@ -26,7 +26,7 @@ For detailed documentation including parameters and examples, see [MCP Tools Ref
 | [Validation](#validation-tools)                 | 4     | Object/document health checking      |
 | [View & Display](#view-tools)                   | 11    | View control, screenshots (GUI only) |
 | [Export/Import](#export-tools)                  | 7     | File format conversion               |
-| [CAM](#cam-tools)                               | 22    | CAM jobs, toolpaths, G-code          |
+| [CAM](#cam-tools)                               | 23    | CAM jobs, toolpaths, G-code          |
 | [Macros](#macro-tools)                          | 6     | Macro management                     |
 | [Utility](#utility-tools)                       | 7     | Undo/redo, parts library             |
 
@@ -415,8 +415,9 @@ type with defaults and allowed values.
 | `cam_list_tool_library`      | List tool libraries, tool bits and tool shapes                                     |
 | `cam_analyze_model`          | List model faces and drillable holes to choose Base features                       |
 | `cam_create_job`             | Create a CAM job (no dialog), optional template, model offset, stock               |
-| `cam_set_stock`              | Replace job stock: from_base margins, box or cylinder                              |
-| `cam_add_tool_controller`    | Add tool bit (library, file or shape) with speeds and feeds                        |
+| `cam_set_stock`              | Replace job stock (from_base margins, box, cylinder) and/or set its material       |
+| `cam_add_tool_controller`    | Add tool bit; speeds and feeds from its preset for the stock material, or given    |
+| `cam_feeds_speeds`           | Compare tool controllers with FreeCAD's feeds & speeds presets; optionally apply   |
 | `cam_remove_tool_controller` | Remove an unused tool controller                                                   |
 | `cam_add_operation`          | Add any CAM operation (Profile, Pocket, Adaptive, Drilling, Helix, ...)            |
 | `cam_add_dressup`            | Add a dressup (Tags, Boundary, Dogbone, LeadInOut, RampEntry, ...)                 |
@@ -441,6 +442,14 @@ Process command would, named by the job's output pattern
 (`Job.PostProcessorOutputFile`, e.g. `%D/%S-%t-%d.nc`). On FreeCAD 26.3+ a job
 with a machine (`Job.Machine`, a `.fcm` file in `CamAssets/Machines`) gets its
 post processor and options from the machine.
+
+Speeds and feeds (FreeCAD 26.3+): a tool bit can carry presets (cutting speed
+and chipload per stock material and operation type, the tool editor's
+"Presets" tab). `cam_add_tool_controller` applies the preset matching the
+job's stock material (`cam_set_stock(material=...)`, choices in
+`cam_get_capabilities` `stock_materials`), as the tool controller's "Feeds
+and Speeds Wizard" does. `feeds_speeds="resolver"` also allows FreeCAD's
+fallback to the material's generic surface speed; `"none"` turns it off.
 
 `cam_add_operation` also creates Comment, Stop, Copy, Array and SimpleCopy
 (`source_operations=[...]`); `cam_add_dressup` also Boundary2, Mirror and

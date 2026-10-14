@@ -118,7 +118,10 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
             ones on 26.3+), machine_post_processors and machines (26.3+, a
             job uses them through its Machine property), job_templates,
             default_job_template, asset_path, freecad_home, local_patches,
-            known_freecad_issues.
+            known_freecad_issues, stock_materials (26.3+: materials with
+            FreeCAD's Machinability model, i.e. the ones CAM offers as stock
+            material; name, uuid, library, folder and their generic surface
+            speeds, if any).
         """
         return await run("capabilities", {})
 
@@ -216,7 +219,7 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
 
     @mcp.tool()
     async def cam_set_stock(
-        kind: str = "from_base",
+        kind: str | None = None,
         job_name: str | None = None,
         doc_name: str | None = None,
         extent_neg: list[float] | None = None,
@@ -225,12 +228,14 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
         radius: float | None = None,
         height: float | None = None,
         placement: dict[str, Any] | None = None,
+        material: str | None = None,
     ) -> dict[str, Any]:
-        """Replace a job's stock.
+        """Replace a job's stock and/or assign the stock material.
 
         Args:
             kind: "from_base" (model bounding box plus margins), "box" or
-                "cylinder".
+                "cylinder". If None: only assign `material` to the existing
+                stock, or "from_base" when no material is given.
             job_name: Job. Optional if the document has exactly one job.
             doc_name: Document. Uses the active document if None.
             extent_neg: from_base margins [x, y, z] on the negative sides (mm).
@@ -239,9 +244,14 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
             radius: cylinder radius (mm).
             height: cylinder height (mm).
             placement: {"base": [x, y, z], "axis": [x, y, z], "angle": deg}.
+            material: Stock material (FreeCAD 26.3+), name or UUID of a
+                material from cam_get_capabilities' stock_materials. Feeds &
+                speeds presets on tool bits are matched against it. A
+                replaced stock keeps its material when this is None.
 
         Returns:
-            Dictionary with stock name, kind and bound_box.
+            Dictionary with stock name, kind, bound_box, material,
+            material_uuid.
         """
         return await run(
             "set_stock",
@@ -255,6 +265,7 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
                 "radius": radius,
                 "height": height,
                 "placement": placement,
+                "material": material,
             },
             "Set CAM Stock",
         )
@@ -272,8 +283,16 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
         vert_feed: str | None = None,
         properties: dict[str, Any] | None = None,
         expressions: dict[str, str | None] | None = None,
+        feeds_speeds: str = "preset",
+        op_type: str | None = None,
     ) -> dict[str, Any]:
         """Add a tool controller (tool bit plus speeds and feeds) to a job.
+
+        Speeds and feeds come first from FreeCAD's feeds & speeds lookup (the
+        tool controller's "Feeds and Speeds Wizard", FreeCAD 26.3+): a preset
+        on the tool bit that matches the job's stock material (cam_set_stock
+        material). Explicit spindle_speed/horiz_feed/vert_feed/properties
+        override it per value.
 
         Args:
             tool: One of
@@ -292,9 +311,17 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
             vert_feed: Plunge feed with unit, e.g. "200 mm/min".
             properties: Any further tool controller properties.
             expressions: Property expressions, e.g. {"SpindleSpeed": "..."}.
+            feeds_speeds: "preset" (only a curated preset of the tool for the
+                stock material), "resolver" (FreeCAD's full lookup, which
+                falls back to the material's generic surface speed and the
+                tool's default chipload) or "none".
+            op_type: Narrows the preset choice: "profile", "pocket", "slot",
+                "drill", "adaptive" or "surface_finish". None matches any.
 
         Returns:
-            Dictionary with name, label, tool_number, tool, diameter, properties.
+            Dictionary with name, label, tool_number, tool, diameter,
+            feeds_speeds (what the lookup found and whether it was applied),
+            properties.
         """
         return await run(
             "add_tool_controller",
@@ -310,8 +337,57 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
                 "vert_feed": vert_feed,
                 "properties": properties,
                 "expressions": expressions,
+                "feeds_speeds": feeds_speeds,
+                "op_type": op_type,
             },
             "Add Tool Controller",
+        )
+
+    @mcp.tool()
+    async def cam_feeds_speeds(
+        job_name: str | None = None,
+        doc_name: str | None = None,
+        tool_controllers: list[str] | None = None,
+        mode: str = "preset",
+        op_type: str | None = None,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Compare tool controllers with FreeCAD's feeds & speeds lookup.
+
+        Runs what the "Feeds and Speeds Wizard" of a tool controller runs
+        (FreeCAD 26.3+): presets on the tool bit, matched against the job's
+        stock material (cam_set_stock material). Use it to check a job's
+        speeds and feeds, or with apply=True to set them.
+
+        Args:
+            job_name: Job. Optional if the document has exactly one job.
+            doc_name: Document. Uses the active document if None.
+            tool_controllers: Tool controllers (names or unique labels). All
+                of the job if None.
+            mode: "preset" (only curated presets of the tool) or "resolver"
+                (also the material's generic surface speed and the tool's
+                default chipload).
+            op_type: "profile", "pocket", "slot", "drill", "adaptive" or
+                "surface_finish"; None matches any.
+            apply: Write the suggestion to the tool controller.
+
+        Returns:
+            Dictionary with job, material, material_uuid and per tool
+            controller: current values and suggestion (source, confidence,
+            spindle_speed, horiz_feed_mm_min, vert_feed_mm_min,
+            surface_speed_m_min, chipload_mm, warnings, applied, or a note).
+        """
+        return await run(
+            "feeds_speeds",
+            {
+                "job_name": job_name,
+                "doc_name": doc_name,
+                "tool_controllers": tool_controllers,
+                "mode": mode,
+                "op_type": op_type,
+                "apply": apply,
+            },
+            "CAM Feeds and Speeds",
         )
 
     @mcp.tool()

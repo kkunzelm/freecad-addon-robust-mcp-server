@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import warnings
 from pathlib import Path as FsPath
 from typing import Any
 
@@ -590,6 +591,7 @@ def capabilities(_args: dict[str, Any]) -> dict[str, Any]:
         "freecad_home": FreeCAD.getHomePath(),
         "local_patches": _local_patches(),
         "known_freecad_issues": FREECAD_BUGS,
+        "stock_materials": _machining_materials(),
     }
 
 
@@ -845,12 +847,18 @@ def create_job(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def set_stock(args: dict[str, Any]) -> dict[str, Any]:
-    """Replace a job's stock (see tools.cam.cam_set_stock)."""
+    """Replace a job's stock and/or assign its material (see tools.cam.cam_set_stock)."""
     import Path.Main.Stock as PathStock
 
     doc = _doc(args.get("doc_name"))
     job = _job(doc, args.get("job_name"))
-    kind = args.get("kind", "from_base")
+    material = _find_material(args["material"]) if args.get("material") else None
+    kind = args.get("kind")
+    if kind is None and material is not None and job.Stock is not None:
+        job.Stock.ShapeMaterial = material  # material only, the stock stays
+        doc.recompute()
+        return _stock_info(job.Stock, None)
+    kind = kind or "from_base"
     placement = _placement(args.get("placement"))
     if kind == "from_base":
         neg = FreeCAD.Vector(*args.get("extent_neg", [1, 1, 1]))
@@ -863,18 +871,209 @@ def set_stock(args: dict[str, Any]) -> dict[str, Any]:
     else:
         raise ValueError(f"kind must be one of {STOCK_KINDS}")
     old = job.Stock
+    if material is None and old is not None:
+        material = getattr(old, "ShapeMaterial", None)  # keep the material
     job.Stock = new
+    if material is not None and hasattr(new, "ShapeMaterial"):
+        new.ShapeMaterial = material
     if old is not None and old is not new:
         doc.removeObject(old.Name)
     doc.recompute()
-    bb = new.Shape.BoundBox
-    return {
-        "stock": new.Name,
-        "kind": kind,
-        "bound_box": [
-            round(v, 4) for v in (bb.XMin, bb.XMax, bb.YMin, bb.YMax, bb.ZMin, bb.ZMax)
-        ],
+    return _stock_info(new, kind)
+
+
+def _stock_info(stock: Any, kind: str | None) -> dict[str, Any]:
+    bb = stock.Shape.BoundBox
+    info: dict[str, Any] = {"stock": stock.Name}
+    if kind:
+        info["kind"] = kind
+    info["bound_box"] = [
+        round(v, 4) for v in (bb.XMin, bb.XMax, bb.YMin, bb.YMax, bb.ZMin, bb.ZMax)
+    ]
+    info.update(_stock_material(stock))
+    return info
+
+
+# ---------------------------------------------------------------------------
+# Stock material and feeds & speeds (FreeCAD 26.3+: Materials + Path.Tool.FeedsSpeeds)
+# ---------------------------------------------------------------------------
+
+FEEDS_SPEEDS_MODES = ("preset", "resolver", "none")
+
+
+def _material_props(mat: Any) -> dict[str, Any]:
+    # PhysicalProperties is deprecated in 26.3, but FreeCAD's F&S dialog reads it too
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return dict(getattr(mat, "PhysicalProperties", {}) or {})
+
+
+def _machining_materials() -> list[dict[str, Any]] | None:
+    """Materials with the Machinability model: the ones CAM's dialogs offer for stock."""
+    try:
+        import Materials
+    except ImportError:
+        return None
+    found = Materials.MaterialManager().materialsWithModel(
+        Materials.UUIDs().Machinability
+    )
+    out = []
+    for uuid, mat in found.items():
+        props = _material_props(mat)
+        out.append(
+            {
+                "name": mat.Name,
+                "uuid": uuid,
+                "library": getattr(mat, "LibraryName", None),
+                "folder": getattr(mat, "Directory", None),
+                # generic speeds feed FreeCAD's "resolver" fallback; presets don't need them
+                "surface_speed_hss": props.get("SurfaceSpeedHSS") or None,
+                "surface_speed_carbide": props.get("SurfaceSpeedCarbide") or None,
+            }
+        )
+    return sorted(out, key=lambda m: (m["library"] or "", m["name"]))
+
+
+def _find_material(spec: str) -> Any:
+    """A machining material by UUID or (case-insensitive) name."""
+    import Materials
+
+    manager = Materials.MaterialManager()
+    found = manager.materialsWithModel(Materials.UUIDs().Machinability)
+    if spec in found:
+        return found[spec]
+    hits = [m for m in found.values() if m.Name.casefold() == spec.casefold()]
+    if len(hits) == 1:
+        return hits[0]
+    names = sorted(m.Name for m in found.values())
+    if hits:
+        raise ValueError(f"material {spec!r} is ambiguous, pass its UUID")
+    raise ValueError(f"no machining material {spec!r}; available: {names}")
+
+
+def _is_machining_material(mat: Any) -> bool:
+    try:
+        import Materials
+
+        return bool(mat) and mat.hasPhysicalModel(Materials.UUIDs().Machinability)
+    except Exception:
+        return False
+
+
+def _stock_material(stock: Any) -> dict[str, Any]:
+    mat = getattr(stock, "ShapeMaterial", None)
+    if mat is None or not getattr(mat, "UUID", None):
+        return {"material": None}
+    return {"material": mat.Name, "material_uuid": mat.UUID}
+
+
+def _feeds_speeds(
+    tc: Any, job: Any, mode: str, op_type: str | None, apply: bool
+) -> dict[str, Any]:
+    """FreeCAD's feeds & speeds lookup (the tool controller's wizard) for one TC.
+
+    mode "preset": only a curated preset on the tool bit that matches the job's
+    stock material and the op type. "resolver": FreeCAD's full chain, which
+    falls back to the stock material's generic surface speed and the tool's
+    default chipload. "none": nothing.
+    """
+    if mode not in FEEDS_SPEEDS_MODES:
+        raise ValueError(f"feeds_speeds must be one of {FEEDS_SPEEDS_MODES}")
+    if mode == "none":
+        return {"mode": mode, "applied": False}
+    try:
+        from Path.Tool.FeedsSpeeds import OP_TYPES, OpContext, resolve
+        from Path.Tool.FeedsSpeeds.providers import ToolPresetProvider
+        from Path.Tool.Gui.FeedsSpeedsDialog import (
+            adapt_machine_from_job,
+            adapt_material_from_job,
+            adapt_toolbit,
+            write_result_to_tc,
+        )
+    except ImportError:
+        return {
+            "mode": mode,
+            "applied": False,
+            "note": "needs FreeCAD 26.3+ (FeedsSpeeds)",
+        }
+    if op_type is not None and op_type not in OP_TYPES:
+        raise ValueError(f"op_type must be one of {list(OP_TYPES)}")
+    material = adapt_material_from_job(job)
+    providers = [ToolPresetProvider()] if mode == "preset" else None
+    result = resolve(
+        adapt_toolbit(tc),
+        material,
+        OpContext(op_type=op_type),
+        adapt_machine_from_job(job),
+        providers=providers,
+    )
+    out: dict[str, Any] = {
+        "mode": mode,
+        "material": material.name,
+        "source": result.source or None,
+        "applied": False,
     }
+    if not result.source:
+        if material.uuid is None:
+            out["note"] = (
+                "no stock material; assign one with cam_set_stock(material=...)"
+            )
+        elif not _is_machining_material(getattr(job.Stock, "ShapeMaterial", None)):
+            out["note"] = (
+                f"stock material {material.name!r} is not a machining material; "
+                "assign one with cam_set_stock(material=...)"
+            )
+        else:
+            out["note"] = "nothing found for this tool and material"
+        return out
+    out.update(
+        {
+            "confidence": round(result.confidence, 2),
+            "spindle_speed": _round(result.spindle_speed),
+            "horiz_feed_mm_min": _round(result.horiz_feed),
+            "vert_feed_mm_min": _round(result.vert_feed),
+            "surface_speed_m_min": _round(result.surface_speed),
+            "chipload_mm": result.chipload,
+            "warnings": list(result.warnings),
+        }
+    )
+    if apply and (result.spindle_speed is not None or result.horiz_feed is not None):
+        write_result_to_tc(tc, result)
+        out["applied"] = True
+    return out
+
+
+def _round(v: float | None) -> float | None:
+    return None if v is None else round(v, 3)
+
+
+def feeds_speeds(args: dict[str, Any]) -> dict[str, Any]:
+    """Feeds & speeds suggestions for a job's tool controllers (see tools.cam)."""
+    doc = _doc(args.get("doc_name"))
+    job = _job(doc, args.get("job_name"))
+    wanted = args.get("tool_controllers")
+    tcs = [_obj(doc, n) for n in wanted] if wanted else list(job.Tools.Group)
+    out = []
+    for tc in tcs:
+        entry = {
+            "tool_controller": tc.Label,
+            "tool": tc.Tool.Label if tc.Tool else None,
+            "current": {
+                "spindle_speed": tc.SpindleSpeed,
+                "horiz_feed_mm_min": _round(_mm(tc.HorizFeed) * 60),
+                "vert_feed_mm_min": _round(_mm(tc.VertFeed) * 60),
+            },
+        }
+        entry["suggestion"] = _feeds_speeds(
+            tc,
+            job,
+            args.get("mode", "preset"),
+            args.get("op_type"),
+            args.get("apply", False),
+        )
+        out.append(entry)
+    doc.recompute()
+    return {"job": job.Label, **_stock_material(job.Stock), "tool_controllers": out}
 
 
 _AXES = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
@@ -1039,6 +1238,10 @@ def add_tool_controller(args: dict[str, Any]) -> dict[str, Any]:
     label = args.get("label") or f"TC: {tool.Label}"
     tc = PathTC.Create(label, tool, number)
     job.Proxy.addToolController(tc)
+    # FreeCAD's wizard lookup first; explicit values below override it per field
+    feeds = _feeds_speeds(
+        tc, job, args.get("feeds_speeds", "preset"), args.get("op_type"), True
+    )
     values = {
         k: v
         for k, v in {
@@ -1060,6 +1263,7 @@ def add_tool_controller(args: dict[str, Any]) -> dict[str, Any]:
         "tool_number": tc.ToolNumber,
         "tool": tool.Label,
         "diameter": _safe(tool.Diameter) if hasattr(tool, "Diameter") else None,
+        "feeds_speeds": feeds,
         "properties": _describe_props(tc),
     }
 
@@ -1589,6 +1793,7 @@ def inspect_job(args: dict[str, Any]) -> dict[str, Any]:
                 round(v, 4)
                 for v in (sb.XMin, sb.XMax, sb.YMin, sb.YMax, sb.ZMin, sb.ZMax)
             ],
+            **_stock_material(job.Stock),
         },
         "tool_controllers": tcs,
         "operations": ops,

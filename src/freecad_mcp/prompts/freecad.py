@@ -363,9 +363,15 @@ If boolean fails:
 ## Workflow
 1. `cam_get_capabilities()` - types, post processors, templates, known issues
 2. `cam_analyze_model(object_name)` - faces and holes for operation Base
-3. `cam_create_job(model_objects, template=..., stock=...)`
-4. `cam_add_tool_controller(tool=..., horiz_feed="800 mm/min", ...)`
-   (or use a job template that already holds the tool controllers)
+3. `cam_create_job(model_objects, template=..., stock={..., "material": ...})`
+   Stock material: one of `stock_materials` from cam_get_capabilities;
+   later `cam_set_stock(material=...)`. FreeCAD's default "Default" is not
+   a machining material.
+4. `cam_add_tool_controller(tool=..., op_type=...)`: speeds and feeds from
+   the tool bit's preset for the stock material (FreeCAD 26.3+ feeds &
+   speeds); explicit `horiz_feed="800 mm/min"` etc. override. Check the
+   result's `feeds_speeds`. A template already holds tool controllers;
+   `cam_feeds_speeds()` compares them with the presets.
 5. `cam_add_operation(op_type, tool_controller, base, properties)`
 6. `cam_add_dressup("Tags", base_operation, tag_count=4)` etc.
 7. `cam_inspect_job()` - check every path summary: warnings and notes
