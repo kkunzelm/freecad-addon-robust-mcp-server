@@ -53,6 +53,7 @@ OPERATIONS: dict[str, tuple[str, str]] = {
     "PocketShape": ("Path.Op.PocketShape", "Path.Op.Gui.PocketShape"),
     "Adaptive": ("Path.Op.Adaptive", "Path.Op.Gui.Adaptive"),
     "MillFace": ("Path.Op.MillFace", "Path.Op.Gui.MillFace"),
+    "MillFacing": ("Path.Op.MillFacing", "Path.Op.Gui.MillFacing"),
     "Helix": ("Path.Op.Helix", "Path.Op.Gui.Helix"),
     "Drilling": ("Path.Op.Drilling", "Path.Op.Gui.Drilling"),
     "Tapping": ("Path.Op.Tapping", "Path.Op.Gui.Tapping"),
@@ -63,6 +64,9 @@ OPERATIONS: dict[str, tuple[str, str]] = {
     "Slot": ("Path.Op.Slot", "Path.Op.Gui.Slot"),
     "Surface": ("Path.Op.Surface", "Path.Op.Gui.Surface"),
     "Waterline": ("Path.Op.Waterline", "Path.Op.Gui.Waterline"),
+    "PlanarSurface": ("Path.Op.PlanarSurface", "Path.Op.Gui.PlanarSurface"),
+    "RotarySurface": ("Path.Op.RotarySurface", "Path.Op.Gui.RotarySurface"),
+    "Flute": ("Path.Op.Flute", "Path.Op.Gui.Flute"),
     "Probe": ("Path.Op.Probe", "Path.Op.Gui.Probe"),
     "Custom": ("Path.Op.Custom", "Path.Op.Gui.Custom"),
 }
@@ -73,6 +77,7 @@ OPERATION_INFO: dict[str, str] = {
     "PocketShape": "Clear 2.5D pockets from faces or outlines",
     "Adaptive": "Adaptive (trochoidal) clearing or profiling",
     "MillFace": "Face the top of the stock or model",
+    "MillFacing": "Face the top of the stock (newer facing op)",
     "Helix": "Helical interpolation of holes (e.g. counterbores)",
     "Drilling": "Drill cycles G81/G82/G83/G73/G85 on holes",
     "Tapping": "Tapping cycles G84/G74",
@@ -83,6 +88,10 @@ OPERATION_INFO: dict[str, str] = {
     "Slot": "Slots between features or along edges",
     "Surface": "3D surface (needs OpenCamLib)",
     "Waterline": "3D waterline (needs OpenCamLib)",
+    "PlanarSurface": "3D finishing, successor of Surface+Waterline "
+    "(experimental, needs OpenCamLib)",
+    "RotarySurface": "4-axis rotary surfacing (experimental, needs a rotary axis)",
+    "Flute": "Ramping flute along a face centerline or flat wire (experimental)",
     "Probe": "Probe grid for Z correction",
     "Custom": "Literal G-code lines",
 }

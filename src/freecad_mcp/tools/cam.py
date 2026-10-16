@@ -35,6 +35,11 @@ def _runtime_source() -> str:
     return _RUNTIME_PATH.read_text(encoding="utf-8")
 
 
+# 3D operations (Surface, Waterline, PlanarSurface) and simulations can compute
+# for minutes; the bridge's 30 s default would give up while FreeCAD keeps going.
+CAM_TIMEOUT_MS = 600_000
+
+
 def build_cam_code(
     func: str,
     args: dict[str, Any],
@@ -98,7 +103,8 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
     ) -> Any:
         bridge = await get_bridge()
         result = await bridge.execute_python(
-            build_cam_code(func, _drop_none(args), transaction)
+            build_cam_code(func, _drop_none(args), transaction),
+            timeout_ms=CAM_TIMEOUT_MS,
         )
         if result.success:
             return result.result
@@ -431,9 +437,10 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
 
         Args:
             op_type: Operation type, e.g. "Profile", "Pocket", "PocketShape",
-                "Adaptive", "MillFace", "Helix", "Drilling", "Tapping",
-                "ThreadMilling", "Engrave", "Vcarve", "Deburr", "Slot",
-                "Surface", "Waterline", "Probe", "Custom"; or one that works
+                "Adaptive", "MillFace", "MillFacing", "Helix", "Drilling",
+                "Tapping", "ThreadMilling", "Engrave", "Vcarve", "Deburr",
+                "Slot", "Surface", "Waterline", "PlanarSurface",
+                "RotarySurface", "Flute", "Probe", "Custom"; or one that works
                 on other operations or the program flow: "Comment" (property
                 Comment), "Stop" (property Stop: "Mandatory" M0 / "Optional"
                 M1), "Copy" (linked copy of one operation), "Array" (linear,

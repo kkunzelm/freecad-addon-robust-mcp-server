@@ -185,6 +185,14 @@ class TestCamTools:
         has_txn = "openTransaction" in code
         assert has_txn == (tool_name in MODIFYING_TOOLS)
 
+    async def test_long_timeout_for_cam_calls(
+        self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]
+    ) -> None:
+        tools, bridge = tools_and_bridge
+        await tools["cam_add_operation"](op_type="Surface")
+        timeout = bridge.execute_python.call_args.kwargs["timeout_ms"]
+        assert timeout == cam.CAM_TIMEOUT_MS
+
     async def test_none_arguments_are_dropped(
         self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]
     ) -> None:
