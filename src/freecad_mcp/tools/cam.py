@@ -123,7 +123,8 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
             stock_kinds, post_processors (Job.PostProcessor choices; legacy
             ones on 26.3+), machine_post_processors and machines (26.3+, a
             job uses them through its Machine property), job_templates,
-            default_job_template, asset_path, freecad_home, local_patches,
+            default_job_template, asset_path, tool_system ("assets" on FreeCAD
+            1.1+, "legacy" tool bit files on 1.0), freecad_home,
             known_freecad_issues, stock_materials (26.3+: materials with
             FreeCAD's Machinability model, i.e. the ones CAM offers as stock
             material; name, uuid, library, folder and their generic surface
@@ -853,7 +854,7 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
         """Simulate material removal and check for cuts into the part.
 
         Uses FreeCAD's voxel simulator (the engine of its older CAM
-        simulator, FreeCAD 26.3+): the stock is cut along the toolpaths of
+        simulator): the stock is cut along the toolpaths of
         the active operations with their tool shapes, seen from above
         (3-axis; feeds, holder and collisions are not simulated). The
         result is compared with the model's top surface on a grid: material

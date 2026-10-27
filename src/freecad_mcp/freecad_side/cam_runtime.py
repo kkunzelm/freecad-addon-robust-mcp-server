@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import traceback
 import warnings
 from pathlib import Path as FsPath
 from typing import Any
@@ -226,6 +227,20 @@ FREECAD_BUGS: dict[str, str] = {
         "FreeCAD design issue: LeadInOut, RampEntry, Dragknife, AxisMap and ZCorrect "
         "(plus Boundary2, Mirror, PlungeMilling since 26.3) exist only in GUI "
         "modules and have no headless Create(); they need the FreeCAD GUI."
+    ),
+    "tc-console-mode": (
+        "FreeCAD bug: in console mode (no GUI) FreeCAD before 26.3 cannot create "
+        "an operation in a job with several tool controllers; "
+        "PathUtils.findToolController raises UnboundLocalError. Fixed in FreeCAD "
+        "83d53388d4 (CAM: Fix findToolController for console mode, FreeCAD 26.3); "
+        "use the FreeCAD GUI or a FreeCAD version that contains that fix."
+    ),
+    "hole-op-create": (
+        "FreeCAD bug: FreeCAD 1.0 cannot create hole operations (Drilling, Helix, "
+        "Tapping, ThreadMilling) from a script; CircularHoleBase.findAllHoles runs "
+        "before the operation knows its model and raises TypeError. Fixed in "
+        "FreeCAD ab817f8dc5 (CAM: Fix job assignment and model/stock "
+        "initialization in ObjectOp, FreeCAD 1.1); needs FreeCAD 1.1 or newer."
     ),
     "output-filename-subpart": (
         "FreeCAD bug: the output file pattern uses %T, %t, %W or %O, but this "
@@ -596,28 +611,72 @@ def capabilities(_args: dict[str, Any]) -> dict[str, Any]:
         "machines": _list_machines(),
         "job_templates": templates,
         "default_job_template": Prefs.defaultJobTemplate() or None,
-        "asset_path": str(Prefs.getAssetPath()),
+        "asset_path": str(Prefs.getAssetPath())
+        if hasattr(Prefs, "getAssetPath")
+        else None,
+        "tool_system": "assets" if _has_tool_assets() else "legacy",
         "freecad_home": FreeCAD.getHomePath(),
-        "local_patches": _local_patches(),
         "known_freecad_issues": FREECAD_BUGS,
         "stock_materials": _machining_materials(),
     }
 
 
-def _local_patches() -> str | None:
-    """Content of PATCHED_FROM written by the dev setup's update script, if any."""
-    marker = FsPath(FreeCAD.getHomePath()).parent / "PATCHED_FROM"
+def _has_tool_assets() -> bool:
+    """True if FreeCAD has the tool asset store (FreeCAD 1.1+)."""
     try:
-        return marker.read_text().strip()
-    except OSError:
-        return None
+        from Path.Tool import cam_assets  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _needs_tool_assets(what: str) -> None:
+    if not _has_tool_assets():
+        raise ValueError(
+            f"{what} needs FreeCAD 1.1 or newer (tool asset store); this FreeCAD "
+            "has the older tool bit files"
+        )
+
+
+def _list_tools_legacy(want: str | None) -> dict[str, Any]:
+    """Tool libraries and shapes of FreeCAD 1.0 (.fctl/.fctb/.fcstd files)."""
+    import json
+
+    import Path.Preferences as Prefs
+
+    out: dict[str, Any] = {"libraries": [], "shapes": []}
+    lib_dir = FsPath(Prefs.lastPathToolLibrary())
+    for path in sorted(lib_dir.glob("*.fctl")) if lib_dir.is_dir() else []:
+        if want and want not in (path.stem, path.name):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            out["libraries"].append({"id": path.stem, "error": str(e), "bits": []})
+            continue
+        bits = [
+            {"number": t.get("nr"), "bit_file": t.get("path")}
+            for t in data.get("tools", [])
+        ]
+        out["libraries"].append({"id": path.stem, "label": path.stem, "bits": bits})
+    shapes: set[str] = set()
+    for folder in Prefs.searchPathsTool("Shape"):
+        shapes.update(f.stem for f in FsPath(folder).glob("*.fcstd"))
+    out["shapes"] = sorted(shapes)
+    out["note"] = (
+        "FreeCAD 1.0 tool files: use tool={'bit_file': <.fctb path>} or "
+        "tool={'shape': ...}; library_bit needs FreeCAD 1.1+"
+    )
+    return out
 
 
 def list_tools(args: dict[str, Any]) -> dict[str, Any]:
     """Tool libraries, tool bits and shapes from FreeCAD's tool asset store."""
+    want = args.get("library")
+    if not _has_tool_assets():
+        return _list_tools_legacy(want)
     from Path.Tool import cam_assets
 
-    want = args.get("library")
     out: dict[str, Any] = {"libraries": [], "shapes": []}
     for lib in cam_assets.fetch(asset_type="toolbitlibrary", depth=1):
         if want and want not in (lib.get_id(), lib.label):
@@ -673,6 +732,7 @@ def _library_serializer(path: Any, for_import: bool) -> Any:
 
 def import_tool_library(args: dict[str, Any]) -> dict[str, Any]:
     """Import a tool library file (and its bits) into FreeCAD's tool assets."""
+    _needs_tool_assets("Tool library import/export")
     from Path.Tool import cam_assets
     from Path.Tool.library.models.library import Library
 
@@ -728,6 +788,7 @@ def import_tool_library(args: dict[str, Any]) -> dict[str, Any]:
 
 def export_tool_library(args: dict[str, Any]) -> dict[str, Any]:
     """Write a tool library as .fctl, Camotics .json or LinuxCNC .tbl."""
+    _needs_tool_assets("Tool library import/export")
     from Path.Tool import cam_assets
 
     path = FsPath(args["file_path"])
@@ -1216,15 +1277,11 @@ def _remove_tc(doc: Any, job: Any, tc: Any) -> None:
         doc.removeObject(tool.Name)
 
 
-def add_tool_controller(args: dict[str, Any]) -> dict[str, Any]:
-    """Add a tool bit and its controller to a job."""
-    import Path.Tool.Controller as PathTC
+def _tool_bit(doc: Any, tool_spec: dict[str, Any]) -> Any:
+    """Create a tool bit object from the asset store (FreeCAD 1.1+)."""
     from Path.Tool import cam_assets
     from Path.Tool.toolbit import ToolBit
 
-    doc = _doc(args.get("doc_name"))
-    job = _job(doc, args.get("job_name"))
-    tool_spec = args["tool"]
     if "library_bit" in tool_spec:
         bit = cam_assets.get(f"toolbit://{tool_spec['library_bit']}")
     elif "bit_file" in tool_spec:
@@ -1242,7 +1299,44 @@ def add_tool_controller(args: dict[str, Any]) -> dict[str, Any]:
         )
     else:
         raise ValueError("tool needs one of: library_bit, bit_file, shape")
-    tool = bit.attach_to_doc(doc=doc)
+    return bit.attach_to_doc(doc=doc)
+
+
+def _legacy_tool_bit(doc: Any, tool_spec: dict[str, Any]) -> Any:
+    """Create a tool bit object from a .fctb file or a shape (FreeCAD 1.0)."""
+    from Path.Tool.Bit import Factory
+
+    if FreeCAD.ActiveDocument is not doc:  # Factory.Create adds to ActiveDocument
+        FreeCAD.setActiveDocument(doc.Name)
+    if "library_bit" in tool_spec:
+        _needs_tool_assets("tool={'library_bit': ...}")
+    if "bit_file" in tool_spec:
+        return Factory.CreateFrom(tool_spec["bit_file"])
+    if "shape" in tool_spec:
+        shape = tool_spec["shape"]
+        return Factory.CreateFromAttrs(
+            {
+                "version": 2,
+                "name": tool_spec.get("name") or shape,
+                "shape": shape if shape.endswith(".fcstd") else shape + ".fcstd",
+                "parameter": tool_spec.get("parameters", {}),
+                "attribute": tool_spec.get("attributes", {}),
+            }
+        )
+    raise ValueError("tool needs one of: library_bit, bit_file, shape")
+
+
+def add_tool_controller(args: dict[str, Any]) -> dict[str, Any]:
+    """Add a tool bit and its controller to a job."""
+    import Path.Tool.Controller as PathTC
+
+    doc = _doc(args.get("doc_name"))
+    job = _job(doc, args.get("job_name"))
+    tool_spec = args["tool"]
+    if _has_tool_assets():
+        tool = _tool_bit(doc, tool_spec)
+    else:
+        tool = _legacy_tool_bit(doc, tool_spec)
     number = args.get("tool_number") or job.Proxy.nextToolNumber()
     label = args.get("label") or f"TC: {tool.Label}"
     tc = PathTC.Create(label, tool, number)
@@ -1316,9 +1410,18 @@ def _sources(doc: Any, job: Any, op_type: str, names: list[str] | None) -> list[
             raise ValueError(
                 "Array: all source operations need the same tool controller"
             )
-        if any(PathUtil.coolantModeForOp(s) != "None" for s in srcs):
+        if any(_coolant_mode(s) != "None" for s in srcs):
             raise ValueError("Array: FreeCAD only arrays operations with coolant None")
     return srcs
+
+
+def _coolant_mode(op: Any) -> str:
+    """Coolant mode of an operation, or of its base for a dressup."""
+    from Path.Base import Util as PathUtil
+
+    if hasattr(PathUtil, "coolantModeForOp"):  # FreeCAD 1.1+
+        return str(PathUtil.coolantModeForOp(op))
+    return str(PathUtil.opProperty(op, "CoolantMode") or "None")
 
 
 def _create_special_op(
@@ -1333,7 +1436,7 @@ def _create_special_op(
 
         op = PathCustom.Create(name, parentJob=job)
         op.ToolController = PathUtil.toolControllerForOp(srcs[0])
-        op.CoolantMode = PathUtil.coolantModeForOp(srcs[0])
+        op.CoolantMode = _coolant_mode(srcs[0])
         paths = [PathUtils.getPathWithPlacement(s) for s in srcs]
         op.Gcode = [c.toGCode() for p in paths for c in p.Commands]
         _attach_op_vp(op, spec["gui"])
@@ -1379,6 +1482,15 @@ def add_operation(args: dict[str, Any]) -> dict[str, Any]:
     _select_only(tc)
     try:
         op = mod.Create(args.get("name") or op_type, parentJob=job)
+    except UnboundLocalError as e:
+        # raising aborts the MCP transaction, so the half-made operation is undone
+        raise RuntimeError(FREECAD_BUGS["tc-console-mode"]) from e
+    except TypeError as e:
+        if "findAllHoles" not in {
+            f.name for f in traceback.extract_tb(e.__traceback__)
+        }:
+            raise
+        raise RuntimeError(FREECAD_BUGS["hole-op-create"]) from e
     finally:
         _select_only(None)
     op.ToolController = tc
@@ -1469,6 +1581,18 @@ def _create_dressup(dtype: str, base: Any, job: Any, doc: Any) -> Any:
     return dr
 
 
+def _generate_tags(dr: Any, count: int) -> None:
+    """Regenerate holding tags, `count` on the longest wire."""
+    proxy = dr.Proxy
+    if "maxCount" in vars(proxy):
+        # 26.3+: generateTags(obj) reads the counts the task panel sets
+        proxy.maxCount = count
+        proxy.minCount = min(proxy.minCount, count)
+        proxy.generateTags(dr)
+    else:
+        proxy.generateTags(dr, count)
+
+
 def add_dressup(args: dict[str, Any]) -> dict[str, Any]:
     """Dress an operation; fails if FreeCAD leaves the base op in the job."""
     dtype = args["dressup_type"]
@@ -1492,7 +1616,7 @@ def add_dressup(args: dict[str, Any]) -> dict[str, Any]:
     report = _set_props(doc, job, dr, args.get("properties"), args.get("expressions"))
     doc.recompute()
     if dtype == "Tags" and args.get("tag_count"):
-        dr.Proxy.generateTags(dr, int(args["tag_count"]))
+        _generate_tags(dr, int(args["tag_count"]))
         doc.recompute()
     return {
         "name": dr.Name,
@@ -1620,7 +1744,8 @@ def set_operation_order(args: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _MOVES = ("G0", "G00", "G1", "G01", "G2", "G02", "G3", "G03")
-_CYCLES = ("G73", "G74", "G81", "G82", "G83", "G84", "G85", "G86", "G89")
+_CYCLES = ("G73", "G74", "G81", "G82", "G83", "G84", "G85", "G86", "G88", "G89")
+_ARCS = ("G2", "G02", "G3", "G03")
 
 
 def path_summary(  # noqa: PLR0912 - one pass over the commands, many cases
@@ -1899,25 +2024,23 @@ def _sim_apply(sim: Any, pos: Any, commands: list[Any], resolution: float) -> An
 
     XY arcs become short G1 moves, drill cycles become moves.
     """
-    import Constants  # CAM's G-code name lists (Mod/CAM/Constants.py, 26.3+)
-
-    moves = Constants.GCODE_MOVE_RAPID + Constants.GCODE_MOVE_MILL
-    drills = Constants.GCODE_MOVE_DRILL + Constants.GCODE_DRILL_EXTENDED
+    moves = _MOVES
+    drills = _CYCLES
     first_drill = True
     for i, cmd in enumerate(commands):
         if cmd.Name in moves:
             first_drill = True
-            arc = cmd.Name in Constants.GCODE_MOVE_ARC
+            arc = cmd.Name in _ARCS
             j = i
             while arc and cmd.z is None:  # arcs inherit Z from earlier moves
                 j -= 1
                 cmd.z = commands[j].z if j >= 0 else 0
             if arc and (cmd.k or 0) == 0:
-                ccw = cmd.Name in Constants.GCODE_MOVE_CCW
+                ccw = cmd.Name in ("G3", "G03")
                 pos = _sim_arc(sim, pos, cmd, ccw, resolution)
             else:
                 pos = sim.ApplyCommand(pos, cmd)
-        if cmd.Name in Constants.GCODE_CYCLE_CANCEL:
+        if cmd.Name == "G80":
             first_drill = True
         if cmd.Name in drills:
             pos = _sim_drill(sim, pos, cmd, first_drill)
@@ -2118,7 +2241,18 @@ def check_job(args: dict[str, Any]) -> dict[str, Any]:
             else ImageBuilder.DummyImageBuilder(str(target.parent))
         )
         sanity.data = sanity.summarize()
-        squawks, critical = sanity.get_all_squawks()
+        if hasattr(sanity, "get_all_squawks"):  # FreeCAD 26.3+
+            squawks, critical = sanity.get_all_squawks()
+        else:  # before: each report section holds its own findings
+            squawks = [
+                sq
+                for section in sanity.data.values()
+                if isinstance(section, dict)
+                for sq in section.get("squawkData", [])
+            ]
+            critical = [
+                sq for sq in squawks if sq.get("squawkType") in ("WARNING", "CAUTION")
+            ]
         if report_file:
             target.write_text(sanity.get_output_report(), encoding="utf-8")
     run = sanity.data.get("runData", {})
