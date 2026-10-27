@@ -454,7 +454,16 @@ fallback to the material's generic surface speed; `"none"` turns it off.
 `cam_add_operation` also creates Comment, Stop, Copy, Array and SimpleCopy
 (`source_operations=[...]`); `cam_add_dressup` also Boundary2, Mirror and
 PlungeMilling (FreeCAD 26.3+, GUI only). `cam_simulate` uses FreeCAD's voxel
-simulator (3-axis, from above) and needs FreeCAD 26.3+.
+simulator (3-axis, from above).
+
+FreeCAD versions: the CAM tools are tested with FreeCAD 1.0, 1.1, 26.3 and
+the weekly builds. FreeCAD 1.0 keeps tool bits as files, so it takes
+`tool={"shape": ...}` or `{"bit_file": ...}`; library bits and tool library
+import/export need FreeCAD 1.1+. Known FreeCAD bugs are reported in
+`known_freecad_issues` instead of being worked around: without the GUI,
+FreeCAD before 26.3 cannot add an operation to a job with several tool
+controllers (`tc-console-mode`), and FreeCAD 1.0 cannot create hole
+operations such as Drilling from a script (`hole-op-create`).
 
 ---
 
