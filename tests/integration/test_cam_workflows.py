@@ -143,10 +143,11 @@ def _mm(value: Any) -> float:
 def _legacy_post(caps: dict[str, Any]) -> str:
     """The LinuxCNC post processor a job without a machine can use."""
     posts = caps["post_processors"]
-    for name in ("linuxcnc_legacy", "linuxcnc"):
-        if name in posts:
-            return name
-    pytest.skip("no LinuxCNC post processor enabled in this FreeCAD")
+    name = next((n for n in ("linuxcnc_legacy", "linuxcnc") if n in posts), None)
+    if name is None:
+        pytest.skip("no LinuxCNC post processor enabled in this FreeCAD")
+    assert name is not None  # pytest.skip() does not return
+    return name
 
 
 async def _job_with_tools(

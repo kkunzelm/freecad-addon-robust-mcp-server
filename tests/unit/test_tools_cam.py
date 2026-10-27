@@ -312,12 +312,16 @@ class TestCamTools:
 
 def _literal(name: str) -> Any:
     """A module-level literal assignment of the runtime, e.g. a registry."""
+    target: ast.expr
     for node in ast.parse(cam._runtime_source()).body:
-        target = node.target if isinstance(node, ast.AnnAssign) else None
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target = node.targets[0]
-        if isinstance(target, ast.Name) and target.id == name and node.value:
-            return ast.literal_eval(node.value)
+        if isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        else:
+            continue
+        if isinstance(target, ast.Name) and target.id == name:
+            return ast.literal_eval(value)
     raise KeyError(name)
 
 
