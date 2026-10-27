@@ -270,16 +270,16 @@ class TestCamTools:
         self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]
     ) -> None:
         tools, bridge = tools_and_bridge
-        await tools["cam_set_stock"](material="KHK Stahl 1.2842")
+        await tools["cam_set_stock"](material="Steel-Generic")
         payload = _payload(bridge.execute_python.call_args.args[0])
-        assert payload == {"material": "KHK Stahl 1.2842"}
+        assert payload == {"material": "Steel-Generic"}
 
     async def test_add_tool_controller_uses_presets_by_default(
         self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]
     ) -> None:
         tools, bridge = tools_and_bridge
         await tools["cam_add_tool_controller"](
-            tool={"library_bit": "khk_inox_d6"}, op_type="profile"
+            tool={"library_bit": "endmill_6mm"}, op_type="profile"
         )
         payload = _payload(bridge.execute_python.call_args.args[0])
         assert payload["feeds_speeds"] == "preset"
