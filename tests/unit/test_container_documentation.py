@@ -43,7 +43,17 @@ def test_container_guides_document_security_boundary(path: Path) -> None:
     assert "Docker Desktop" in contents
     assert "Docker Engine" in contents
     assert "loopback" in contents
-    assert "unauthenticated Python execution" in normalized_contents
+    assert "pairing" in normalized_contents
+    assert (
+        "Python execution" in normalized_contents
+        or "execute Python" in normalized_contents
+    )
+    assert "unauthenticated Python execution" not in normalized_contents
+    assert (
+        "requires pairing before accepting Python execution" in normalized_contents
+        or "require pairing with the MCP server before accepting requests"
+        in normalized_contents
+    )
 
 
 def test_workbench_troubleshooting_rejects_non_loopback_rebind() -> None:

@@ -210,9 +210,12 @@ If installed from source with mise/uv:
 
 ### Docker Desktop Configuration
 
-This configuration is supported on Docker Desktop for macOS and Windows.
 Docker Desktop forwards `host.docker.internal` to services listening on the
-host loopback interface.
+host loopback interface. This example configures networking only: the
+container must also receive the existing bridge pairing credential. Pairing on
+the host does not automatically provision the container, and a portable secure
+provisioning procedure has not yet been validated. Run the MCP server on the
+host until the container's credential has been provisioned securely.
 
 ```json
 {
@@ -231,7 +234,7 @@ host loopback interface.
 ```
 
 !!! danger "Do not expose the FreeCAD bridge"
-    The bridge accepts unauthenticated Python execution inside FreeCAD and must
+    The bridge requires pairing before accepting Python execution inside FreeCAD and must
     remain loopback-only. Do not rebind ports 9875 or 9876 to `0.0.0.0` or a
     LAN address.
 
