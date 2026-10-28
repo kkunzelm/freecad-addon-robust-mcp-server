@@ -25,15 +25,21 @@ def test_gui_startup_cleanup_preserves_unrelated_qt_timer(
     )
     result: dict[str, Any] = xmlrpc_proxy.execute(  # type: ignore[assignment]
         f"""
+import importlib
 import os
 import runpy
-from freecad_mcp_bridge.qt_compat import load_qt_core
+import sys
+import types
 
-qtcore = load_qt_core()
+package = types.ModuleType("freecad.MCPCleanupProbe")
+package.__path__ = [{str(init_path.parent)!r}]
+sys.modules[package.__name__] = package
+qt_compat = importlib.import_module("freecad.MCPCleanupProbe.freecad_mcp_bridge.qt_compat")
+qtcore = qt_compat.load_qt_core()
 previous = os.environ.get("FREECAD_MCP_TESTING")
 os.environ["FREECAD_MCP_TESTING"] = "1"
 try:
-    state = runpy.run_path({str(init_path)!r}, run_name="mcp_cleanup_test")
+    state = runpy.run_path({str(init_path)!r}, run_name="freecad.MCPCleanupProbe.__init__")
 finally:
     if previous is None:
         os.environ.pop("FREECAD_MCP_TESTING", None)

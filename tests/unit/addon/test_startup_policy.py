@@ -18,6 +18,38 @@ policy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(policy)
 
 
+def _install_package_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Execute startup under the same package name FreeCAD uses."""
+    import freecad_mcp_bridge
+    from freecad_mcp_bridge import qt_compat, server, startup_policy
+
+    package = ModuleType("freecad.RobustMCPBridge")
+    package.__path__ = [str(ADDON)]
+    monkeypatch.setitem(sys.modules, "freecad.RobustMCPBridge", package)
+    for name in ("preferences", "commands"):
+        if name in sys.modules:
+            monkeypatch.setitem(
+                sys.modules, f"freecad.RobustMCPBridge.{name}", sys.modules[name]
+            )
+    for name, module in (
+        ("", freecad_mcp_bridge),
+        (".qt_compat", qt_compat),
+        (".server", server),
+        (".startup_policy", startup_policy),
+    ):
+        monkeypatch.setitem(
+            sys.modules, f"freecad.RobustMCPBridge.freecad_mcp_bridge{name}", module
+        )
+    qualified = "freecad.RobustMCPBridge.freecad_mcp_bridge.bridge_utils"
+    spec = importlib.util.spec_from_file_location(
+        qualified, ADDON / "freecad_mcp_bridge" / "bridge_utils.py"
+    )
+    assert spec is not None and spec.loader is not None
+    bridge_utils = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, qualified, bridge_utils)
+    spec.loader.exec_module(bridge_utils)
+
+
 @pytest.mark.parametrize(
     ("arguments", "batch"),
     [
@@ -101,8 +133,9 @@ def test_cleanup_only_touches_owned_timers_on_their_thread(
     import atexit
 
     monkeypatch.setattr(atexit, "register", lambda *_args: None)
+    _install_package_stubs(monkeypatch)
     namespace = runpy.run_path(
-        str(ADDON / "__init__.py"), run_name="startup_under_test"
+        str(ADDON / "__init__.py"), run_name="freecad.RobustMCPBridge.__init__"
     )
     cleanup = namespace["_release_startup_timers"]
     state = cleanup.__globals__
@@ -182,9 +215,13 @@ def test_headless_preference_and_batch_gates(
     plugin = MagicMock()
     monkeypatch.setattr(server, "FreecadMCPPlugin", MagicMock(return_value=plugin))
 
-    runpy.run_path(str(ADDON / "__init__.py"), run_name="startup_under_test")
+    _install_package_stubs(monkeypatch)
+    runpy.run_path(
+        str(ADDON / "__init__.py"), run_name="freecad.RobustMCPBridge.__init__"
+    )
 
     assert plugin.start.called is expected
+    assert commands._mcp_plugin is (plugin if expected else None)
 
 
 @pytest.mark.parametrize("gui_enabled", [False, True])
@@ -216,5 +253,8 @@ def test_gui_preference_remains_independent(
         "load_qt_core_widgets",
         lambda: (qtcore, SimpleNamespace(QApplication=type("QApplication", (), {}))),
     )
-    runpy.run_path(str(ADDON / "__init__.py"), run_name="startup_under_test")
+    _install_package_stubs(monkeypatch)
+    runpy.run_path(
+        str(ADDON / "__init__.py"), run_name="freecad.RobustMCPBridge.__init__"
+    )
     assert qtcore.QTimer.called is gui_enabled
