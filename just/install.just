@@ -9,6 +9,7 @@
 
 # Project root directory (justfile_directory() returns the main justfile's directory)
 project_root := justfile_directory()
+export FREECAD_MCP_INVOCATION_DIR := invocation_directory_native()
 
 # =============================================================================
 # Helper: FreeCAD Directory Detection
@@ -28,45 +29,17 @@ project_root := justfile_directory()
 _freecad-dirs:
     #!/usr/bin/env bash
     cat << 'DIRS_EOF'
-    # Determine base FreeCAD directory based on OS
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        FREECAD_BASE="$HOME/Library/Application Support/FreeCAD"
-    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        FREECAD_BASE="$HOME/.local/share/FreeCAD"
+    # Use the installer's profile selection, including XDG and numeric versions.
+    if [[ -n "${FREECAD_INSTALL_MOD_DIR:-}" ]]; then
+        MOD_DIR="$FREECAD_INSTALL_MOD_DIR"
     else
-        # Windows: validate APPDATA or use fallback
-        if [[ -n "$APPDATA" ]]; then
-            FREECAD_BASE="$APPDATA/FreeCAD"
-        elif [[ -n "$HOME" ]]; then
-            FREECAD_BASE="$HOME/AppData/Roaming/FreeCAD"
-            echo "Warning: APPDATA not set, using fallback: $FREECAD_BASE" >&2
-        else
-            echo "Error: Neither APPDATA nor HOME is set. Cannot determine FreeCAD directory." >&2
-            exit 1
-        fi
+        MOD_DIR=$(cd "{{project_root}}" && uv run --no-project --python ">=3.11" python -c 'from scripts.install_workbench import default_mod_directory; print(default_mod_directory())') || exit 1
     fi
-
-    # FreeCAD 1.x+ uses versioned directories (v1-1, v1-2, v2-0, etc.)
-    # Find the latest versioned directory if present
-    VERSIONED_DIR=""
-    if [[ -d "$FREECAD_BASE" ]]; then
-        # Find directories matching v*-* pattern (supports v1-*, v2-*, etc.)
-        # Use sort -t- -k1.2 -k2 -n to sort by major then minor version
-        LATEST_VERSION=$(ls -d "$FREECAD_BASE"/v*-* 2>/dev/null | sort -t- -k1.2 -k2 -n | tail -n 1)
-        if [[ -n "$LATEST_VERSION" && -d "$LATEST_VERSION" ]]; then
-            VERSIONED_DIR="$LATEST_VERSION"
-        fi
+    # Native Windows paths need conversion before Bash filesystem operations.
+    if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+        MOD_DIR=$(cygpath -u "$MOD_DIR") || exit 1
     fi
-
-    # Use versioned directory if found, otherwise use base directory
-    if [[ -n "$VERSIONED_DIR" ]]; then
-        MOD_DIR="$VERSIONED_DIR/Mod"
-        MACRO_DIR="$VERSIONED_DIR/Macro"
-        echo "Note: Using FreeCAD versioned directory: $VERSIONED_DIR" >&2
-    else
-        MOD_DIR="$FREECAD_BASE/Mod"
-        MACRO_DIR="$FREECAD_BASE/Macro"
-    fi
+    MACRO_DIR="$(dirname "$MOD_DIR")/Macro"
     DIRS_EOF
 
 # =============================================================================
@@ -129,76 +102,32 @@ uninstall-mcp-server:
 
 # Install the FreeCAD Robust MCP workbench addon to FreeCAD's Mod directory
 # Uses new-style namespace package format: Mod/RobustMCPBridge/freecad/RobustMCPBridge/
-mcp-bridge-workbench:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    PROJECT_DIR="{{project_root}}"
-    # New-style namespace package: freecad/RobustMCPBridge
-    ADDON_NAMESPACE="freecad"
-    ADDON_NAME="RobustMCPBridge"
-
-    # Set FreeCAD directories
-    eval "$(just install::_freecad-dirs)"
-
-    # Install to Mod/RobustMCPBridge/ (addon folder at Mod root)
-    # The namespace package structure is created inside: freecad/RobustMCPBridge/
-    ADDON_DEST="$MOD_DIR/$ADDON_NAME"
-
-    # Build the replacement before removing an existing installation.
-    mkdir -p "$MOD_DIR"
-    STAGING_DIR=$(mktemp -d "$MOD_DIR/.robust-mcp-install.XXXXXX")
-    trap 'rm -rf "$STAGING_DIR"' EXIT
-    python3 "${PROJECT_DIR}/scripts/package_workbench.py" install "$STAGING_DIR/$ADDON_NAME"
-
-    # Remove existing installation if present
-    if [[ -d "$ADDON_DEST" ]]; then
-        echo "Removing existing installation at: $ADDON_DEST"
-        rm -rf "$ADDON_DEST"
-    fi
-
-    # Also remove old-style installations if present
-    OLD_STYLE_DEST="$MOD_DIR/FreecadRobustMCPBridge"
-    if [[ -d "$OLD_STYLE_DEST" ]]; then
-        echo "Removing legacy old-style installation at: $OLD_STYLE_DEST"
-        rm -rf "$OLD_STYLE_DEST"
-    fi
-
-    # Also remove incorrect namespace installation (Mod/freecad/RobustMCPBridge)
-    WRONG_NS_DEST="$MOD_DIR/$ADDON_NAMESPACE/$ADDON_NAME"
-    if [[ -d "$WRONG_NS_DEST" ]]; then
-        echo "Removing incorrect namespace installation at: $WRONG_NS_DEST"
-        rm -rf "$WRONG_NS_DEST"
-        # Clean up empty freecad directory if it exists
-        if [[ -d "$MOD_DIR/$ADDON_NAMESPACE" ]] && [[ -z "$(ls -A "$MOD_DIR/$ADDON_NAMESPACE")" ]]; then
-            rmdir "$MOD_DIR/$ADDON_NAMESPACE"
-        fi
-    fi
-
-    # Install the fully built package on the same filesystem.
-    mv "$STAGING_DIR/$ADDON_NAME" "$ADDON_DEST"
-
-    echo ""
-    echo "=========================================="
-    echo "FreeCAD Robust MCP Workbench installed!"
-    echo "=========================================="
-    echo ""
-    echo "Installation path: $ADDON_DEST"
-    echo ""
-    echo "To use:"
-    echo "  1. Start FreeCAD"
-    echo "  2. Select the 'Robust MCP Bridge' workbench from the workbench selector"
-    echo "  3. Click 'Start MCP Bridge' in the toolbar"
-    echo "  4. Connect your MCP client (Claude Code, etc.) to FreeCAD"
-    echo ""
+[script("uv", "run", "--no-project", "--python", ">=3.11", "python")]
+mcp-bridge-workbench $FREECAD_INSTALL_MOD_DIR="":
+    import os
+    import runpy
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, "../scripts")
+    if os.environ["FREECAD_INSTALL_MOD_DIR"]:
+        selected = Path(os.environ["FREECAD_INSTALL_MOD_DIR"])
+        selected = Path(os.environ["FREECAD_MCP_INVOCATION_DIR"]) / selected
+        sys.argv = ["install_workbench.py", "--mod-dir", str(selected)]
+    runpy.run_path("../scripts/install_workbench.py", run_name="__main__")
 
 # Uninstall the FreeCAD Robust MCP workbench addon
-uninstall-mcp-bridge-workbench:
+uninstall-mcp-bridge-workbench $FREECAD_INSTALL_MOD_DIR="":
     #!/usr/bin/env bash
     set -euo pipefail
     # New-style namespace package: Mod/RobustMCPBridge/freecad/RobustMCPBridge/
     ADDON_NAMESPACE="freecad"
     ADDON_NAME="RobustMCPBridge"
 
+    # Resolve explicit paths before the nested just invocation changes directories.
+    if [[ -n "$FREECAD_INSTALL_MOD_DIR" ]]; then
+        FREECAD_INSTALL_MOD_DIR=$(uv run --no-project --python ">=3.11" python -c 'import os; from pathlib import Path; print(Path(os.environ["FREECAD_MCP_INVOCATION_DIR"]) / os.environ["FREECAD_INSTALL_MOD_DIR"])')
+        export FREECAD_INSTALL_MOD_DIR
+    fi
     # Set FreeCAD directories
     eval "$(just install::_freecad-dirs)"
 
@@ -235,10 +164,15 @@ uninstall-mcp-bridge-workbench:
 # =============================================================================
 
 # Check installation status of all components
-status:
+status $FREECAD_INSTALL_MOD_DIR="":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    # Resolve explicit paths before the nested just invocation changes directories.
+    if [[ -n "$FREECAD_INSTALL_MOD_DIR" ]]; then
+        FREECAD_INSTALL_MOD_DIR=$(uv run --no-project --python ">=3.11" python -c 'import os; from pathlib import Path; print(Path(os.environ["FREECAD_MCP_INVOCATION_DIR"]) / os.environ["FREECAD_INSTALL_MOD_DIR"])')
+        export FREECAD_INSTALL_MOD_DIR
+    fi
     # Set FreeCAD directories
     eval "$(just install::_freecad-dirs)"
 
@@ -269,7 +203,7 @@ status:
     elif [[ -f "{{project_root}}/pyproject.toml" ]] && grep -q 'name = "freecad-robust-mcp"' "{{project_root}}/pyproject.toml" 2>/dev/null; then
         # Dev environment exists - check if synced by looking for .venv
         if [[ -d "{{project_root}}/.venv" ]]; then
-            DEV_VERSION=$(cd "{{project_root}}" && uv run python -c "from freecad_mcp import __version__; print(__version__)" 2>/dev/null || echo "unknown")
+            DEV_VERSION=$(cd "{{project_root}}" && uv run --no-sync python -c "from freecad_mcp import __version__; print(__version__)" 2>/dev/null || echo "unknown")
             echo "✓ Robust MCP Server: AVAILABLE (via dev environment)"
             echo "  Version: $DEV_VERSION"
             echo "  Run: just mcp::run"

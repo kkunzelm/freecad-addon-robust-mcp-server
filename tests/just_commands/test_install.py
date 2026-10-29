@@ -6,11 +6,16 @@ Note: Some tests may modify local installations.
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from tests.just_commands.conftest import JustRunner
 
 
@@ -35,9 +40,41 @@ class TestInstallSyntax:
         result = just.dry_run(command)
         assert result.success, f"Syntax error in '{command}': {result.stderr}"
 
+    @pytest.mark.just_syntax
+    def test_workbench_installer_uses_portable_script(self, just: JustRunner) -> None:
+        """The workbench recipe delegates to the platform-independent installer."""
+        result = just.dry_run("install::mcp-bridge-workbench")
+        assert result.success
+        assert "scripts/install_workbench.py" in result.output
+
 
 class TestInstallRuntime:
     """Runtime tests for install commands."""
+
+    @pytest.mark.just_runtime
+    def test_workbench_installer_with_explicit_mod_directory(
+        self, just: JustRunner, tmp_path: Path
+    ) -> None:
+        """The real just recipe installs only into the explicitly selected Mod."""
+        mod_dir = tmp_path / "selected profile" / "Mod"
+        result = just.run("install::mcp-bridge-workbench", str(mod_dir), timeout=120)
+        assert result.success, result.output
+        assert (mod_dir / "RobustMCPBridge" / "package.xml").is_file()
+        assert (
+            mod_dir / "RobustMCPBridge/freecad/RobustMCPBridge/__init__.py"
+        ).is_file()
+
+        # Exercise relative paths through the same native Windows CI test.
+        relative_mod = tmp_path / "relative profile" / "Mod"
+        try:
+            relative_arg = os.path.relpath(relative_mod, just.project_root)
+        except ValueError:
+            pytest.skip("Temporary directory is on a different Windows drive")
+        relative_result = just.run(
+            "install::mcp-bridge-workbench", relative_arg, timeout=120
+        )
+        assert relative_result.success, relative_result.output
+        assert (relative_mod / "RobustMCPBridge/package.xml").is_file()
 
     @pytest.mark.just_runtime
     def test_status_runs(self, just: JustRunner) -> None:
@@ -46,6 +83,50 @@ class TestInstallRuntime:
         assert result.success, f"Status failed: {result.stderr}"
         # Should contain some expected output
         assert "Installation Status" in result.stdout
+
+    @pytest.mark.just_runtime
+    def test_relative_mod_directory_uses_invocation_directory(
+        self, just: JustRunner, tmp_path: Path
+    ) -> None:
+        """Installation and status resolve the same path relative to the caller."""
+        executable = shutil.which("just")
+        assert executable is not None
+        args = [executable, "--justfile", str(just.project_root / "justfile")]
+        install = subprocess.run(  # noqa: S603 - fixed just command and disposable path
+            [*args, "install::mcp-bridge-workbench", "profile/Mod"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        assert install.returncode == 0, install.stderr
+        target = tmp_path / "profile/Mod/RobustMCPBridge/package.xml"
+        assert target.is_file()
+        status = subprocess.run(  # noqa: S603 - fixed just command and disposable path
+            [*args, "install::status", "profile/Mod"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        assert status.returncode == 0, status.stderr
+        assert "profile/Mod/RobustMCPBridge" in status.stdout.replace("\\", "/")
+
+    @pytest.mark.just_runtime
+    def test_status_uses_selected_mod_directory(
+        self, just: JustRunner, tmp_path: Path
+    ) -> None:
+        """Status inspects the same explicitly selected profile as installation."""
+        mod_dir = tmp_path / "selected profile" / "Mod"
+        (mod_dir / "RobustMCPBridge").mkdir(parents=True)
+        result = just.run("install::status", str(mod_dir), timeout=60)
+        assert result.success, result.stderr
+        assert "Robust MCP Bridge Workbench: INSTALLED" in result.stdout
+        assert "selected profile/Mod/RobustMCPBridge" in result.stdout.replace(
+            "\\", "/"
+        )
 
     @pytest.mark.just_runtime
     def test_freecad_dirs_helper_runs(self, just: JustRunner) -> None:
