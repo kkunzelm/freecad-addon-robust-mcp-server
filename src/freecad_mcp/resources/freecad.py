@@ -1721,7 +1721,7 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                 },
                 {
                     "name": "freecad-guidance",
-                    "description": "Task-specific AI guidance (general, partdesign, sketching, boolean, export, debugging, validation)",
+                    "description": "Task-specific AI guidance (general, partdesign, sketching, boolean, export, cam, debugging, validation)",
                     "key_params": ["task_type"],
                 },
                 {

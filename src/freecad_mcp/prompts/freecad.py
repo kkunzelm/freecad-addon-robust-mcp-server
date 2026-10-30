@@ -123,6 +123,7 @@ For detailed guidance on specific tasks, use the `freecad-guidance` prompt with:
 - `task_type="partdesign"` - Parametric modeling workflow
 - `task_type="sketching"` - 2D sketch creation
 - `task_type="boolean"` - Boolean operations
+- `task_type="cam"` - CAM jobs, toolpaths and G-code
 - `task_type="debugging"` - Troubleshooting
 - `task_type="validation"` - Checking model health
 
