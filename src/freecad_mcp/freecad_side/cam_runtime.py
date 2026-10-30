@@ -1731,9 +1731,11 @@ def set_operation_order(args: dict[str, Any]) -> dict[str, Any]:
     wanted = [_obj(doc, n) for n in args["order"]]
     missing = [o.Label for o in current if o not in wanted]
     extra = [o.Label for o in wanted if o not in current]
-    if missing or extra:
+    repeated = [o.Label for i, o in enumerate(wanted) if o in wanted[:i]]
+    if missing or extra or repeated:
         raise ValueError(
-            f"order must list every operation exactly once; missing {missing}, unknown {extra}"
+            "order must list every operation exactly once; "
+            f"missing {missing}, unknown {extra}, repeated {repeated}"
         )
     job.Operations.Group = wanted
     doc.recompute()

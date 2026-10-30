@@ -277,6 +277,11 @@ async def test_job_operations_and_gcode(
         raise
     assert drilling["path"]["commands"] > 0
 
+    with pytest.raises(ValueError, match="repeated"):
+        await tools["cam_set_operation_order"](
+            order=[drilling["name"], pocket["name"], profile["name"], pocket["name"]],
+            doc_name=doc,
+        )
     order = await tools["cam_set_operation_order"](
         order=[drilling["name"], pocket["name"], profile["name"]], doc_name=doc
     )
