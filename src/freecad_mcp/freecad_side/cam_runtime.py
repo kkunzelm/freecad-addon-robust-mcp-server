@@ -40,6 +40,7 @@ except ImportError:  # FreeCADCmd / headless
 
 
 def _gui() -> bool:
+    """Whether the FreeCAD GUI is up (False when FreeCAD runs headless)."""
     return bool(FreeCAD.GuiUp) and FreeCADGui is not None
 
 
@@ -261,6 +262,7 @@ STOCK_KINDS = ("from_base", "box", "cylinder")
 
 
 def _doc(name: str | None) -> Any:
+    """Return the named or active document and make it the active one."""
     doc = FreeCAD.getDocument(name) if name else FreeCAD.ActiveDocument
     if doc is None:
         raise ValueError("No document (none active and no doc_name given)")
@@ -273,6 +275,7 @@ def _doc(name: str | None) -> Any:
 
 
 def _obj(doc: Any, name: str) -> Any:
+    """Find an object by internal name or, if unique, by label."""
     obj = doc.getObject(name)
     if obj is None:
         found = doc.getObjectsByLabel(name)
@@ -283,6 +286,7 @@ def _obj(doc: Any, name: str) -> Any:
 
 
 def _job_of(obj: Any) -> Any:
+    """Return the CAM job that *obj* belongs to."""
     from PathScripts import PathUtils
 
     job = PathUtils.findParentJob(obj)
@@ -292,6 +296,7 @@ def _job_of(obj: Any) -> Any:
 
 
 def _job(doc: Any, name: str | None) -> Any:
+    """Return the named job, or the document's only job if no name is given."""
     if name:
         job = _obj(doc, name)
         if not _is_job(job):
@@ -332,6 +337,7 @@ def _list_machines() -> list[dict[str, Any]] | None:
 
 
 def _is_job(obj: Any) -> bool:
+    """Whether *obj* is a CAM job."""
     import Path.Main.Job as PathJob
 
     return isinstance(getattr(obj, "Proxy", None), PathJob.ObjectJob)
@@ -373,6 +379,7 @@ _VELOCITY = FreeCAD.Units.Unit("mm/s")
 
 
 def _placement(spec: Any) -> Any:
+    """Build a FreeCAD Placement from {"base", "axis", "angle"}, or None."""
     if spec is None:
         return None
     base = FreeCAD.Vector(*spec.get("base", [0, 0, 0]))
@@ -457,6 +464,7 @@ def _set_props(
 
 
 def _enums(obj: Any, prop: str) -> list[str] | None:
+    """The allowed values of an enumeration property, None for other types."""
     if obj.getTypeIdOfProperty(prop) != "App::PropertyEnumeration":
         return None
     try:
@@ -473,6 +481,7 @@ _INTERNAL_PROPS = {"Proxy", "ExpressionEngine", "_ElementMapVersion", "Path"}
 def _describe_props(
     obj: Any, groups: list[str] | None = None, include_hidden: bool = False
 ) -> list[dict[str, Any]]:
+    """Describe an object's properties: type, group, value, doc, enum, expression."""
     exprs = dict(obj.ExpressionEngine)
     out = []
     for prop in obj.PropertiesList:
@@ -510,6 +519,7 @@ def _describe_props(
 
 
 def _select_only(obj: Any) -> None:
+    """Select only *obj* in the GUI (nothing if None); no-op without GUI."""
     # Op Create() takes a selected tool controller instead of asking via dialog
     if _gui():
         FreeCADGui.Selection.clearSelection()
@@ -518,6 +528,7 @@ def _select_only(obj: Any) -> None:
 
 
 def _attach_op_vp(op: Any, gui_module: str) -> None:
+    """Give an operation created without its GUI command a view provider."""
     if not _gui() or getattr(op.ViewObject, "Proxy", None) is not None:
         return
     import Path.Op.Gui.Base as OpGui
@@ -527,6 +538,7 @@ def _attach_op_vp(op: Any, gui_module: str) -> None:
 
 
 def _op_kind(obj: Any) -> str:
+    """Classify a CAM object: job, operation, dressup, tool_controller or other."""
     if _is_job(obj):
         return "job"
     proxy = getattr(obj, "Proxy", None)
@@ -541,6 +553,7 @@ def _op_kind(obj: Any) -> str:
 
 
 def _type_name(obj: Any) -> str:
+    """The operation or dressup type name of *obj*, as used by the tools."""
     proxy = getattr(obj, "Proxy", None)
     mod = type(proxy).__module__ if proxy is not None else ""
     for name, (m, _g) in OPERATIONS.items():
@@ -632,6 +645,7 @@ def _has_tool_assets() -> bool:
 
 
 def _needs_tool_assets(what: str) -> None:
+    """Raise if this FreeCAD lacks the tool asset store (FreeCAD 1.0)."""
     if not _has_tool_assets():
         raise ValueError(
             f"{what} needs FreeCAD 1.1 or newer (tool asset store); this FreeCAD "
@@ -954,6 +968,7 @@ def set_stock(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stock_info(stock: Any, kind: str | None) -> dict[str, Any]:
+    """Describe a stock object: name, kind, bound box and material."""
     bb = stock.Shape.BoundBox
     info: dict[str, Any] = {"stock": stock.Name}
     if kind:
@@ -973,6 +988,7 @@ FEEDS_SPEEDS_MODES = ("preset", "resolver", "none")
 
 
 def _material_props(mat: Any) -> dict[str, Any]:
+    """A material's physical properties as a plain dict."""
     # PhysicalProperties is deprecated in 26.3, but FreeCAD's F&S dialog reads it too
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -1023,6 +1039,7 @@ def _find_material(spec: str) -> Any:
 
 
 def _is_machining_material(mat: Any) -> bool:
+    """Whether a material has FreeCAD's Machinability model."""
     try:
         import Materials
 
@@ -1032,6 +1049,7 @@ def _is_machining_material(mat: Any) -> bool:
 
 
 def _stock_material(stock: Any) -> dict[str, Any]:
+    """The stock's material name and UUID, or material None."""
     mat = getattr(stock, "ShapeMaterial", None)
     if mat is None or not getattr(mat, "UUID", None):
         return {"material": None}
@@ -1115,6 +1133,7 @@ def _feeds_speeds(
 
 
 def _round(v: float | None) -> float | None:
+    """Round to 3 decimals, keeping None."""
     return None if v is None else round(v, 3)
 
 
@@ -1153,6 +1172,7 @@ _ORIGIN_Z = ("top", "bottom", "center", "keep")
 
 
 def _models_bb(job: Any) -> Any:
+    """The combined bounding box of the job's model clones."""
     bb = FreeCAD.BoundBox()
     for m in job.Model.Group:
         bb.add(m.Shape.BoundBox)
@@ -1264,10 +1284,12 @@ def place_model(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _mm(q: Any) -> float:
+    """A length or feed quantity (or plain number) as a float in FreeCAD units."""
     return float(q.Value) if hasattr(q, "Value") else float(q)
 
 
 def _remove_tc(doc: Any, job: Any, tc: Any) -> None:
+    """Remove a tool controller no operation uses, and its unused tool bit."""
     users = [o.Label for o in tc.InList if _op_kind(o) == "operation"]
     if users:
         raise ValueError(f"{tc.Label} is used by {users}")
@@ -1545,6 +1567,7 @@ def _add_special_operation(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _create_dressup(dtype: str, base: Any, job: Any, doc: Any) -> Any:
+    """Create a dressup of type *dtype* on *base*, the way FreeCAD's GUI does."""
     spec = DRESSUPS[dtype]
     if spec["kind"] == "create":
         dr = importlib.import_module(spec["module"]).Create(base)

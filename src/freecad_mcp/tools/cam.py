@@ -56,6 +56,7 @@ RUNTIME_CHUNK_CHARS = 16_000
 
 
 def _runtime_sha256(source: str) -> str:
+    """SHA-256 of the runtime source, its version check inside FreeCAD."""
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
@@ -154,6 +155,7 @@ def build_runtime_load_code(source: str | None = None) -> list[str]:
 
 
 def _drop_none(args: dict[str, Any]) -> dict[str, Any]:
+    """Leave out arguments that were not given, so the runtime's defaults apply."""
     return {k: v for k, v in args.items() if v is not None}
 
 
