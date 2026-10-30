@@ -597,7 +597,7 @@ async def test_job_template_round_trip(tools: Tools, doc: str, tmp_path: Path) -
 
 
 async def test_tool_library_import_export(
-    tools: Tools, caps: dict[str, Any], tmp_path: Path
+    bridge: XmlRpcBridge, tools: Tools, caps: dict[str, Any], tmp_path: Path
 ) -> None:
     """A .fctl library with its bit is imported and exported as a .tbl table."""
     root = tmp_path / "Tools"
@@ -639,20 +639,34 @@ async def test_tool_library_import_export(
             )
         return
 
-    imported = await tools["cam_import_tool_library"](
-        file_path=str(library), library_id=lib_id
-    )
-    assert [t["number"] for t in imported["tools"]] == [7]
+    # The import writes into the asset store of the FreeCAD under test,
+    # usually the developer's own; remove both assets again.
+    try:
+        imported = await tools["cam_import_tool_library"](
+            file_path=str(library), library_id=lib_id
+        )
+        assert [t["number"] for t in imported["tools"]] == [7]
 
-    listed = await tools["cam_list_tool_library"](library=lib_id)
-    bits = listed["libraries"][0]["bits"]
-    assert [b["number"] for b in bits] == [7]
+        listed = await tools["cam_list_tool_library"](library=lib_id)
+        bits = listed["libraries"][0]["bits"]
+        assert [b["number"] for b in bits] == [7]
 
-    table = tmp_path / "mcp_test.tbl"
-    exported = await tools["cam_export_tool_library"](
-        library=lib_id, file_path=str(table)
-    )
-    assert exported["tools"] == 1
-    text = table.read_text()
-    assert "T7" in text
-    assert "D3" in text
+        table = tmp_path / "mcp_test.tbl"
+        exported = await tools["cam_export_tool_library"](
+            library=lib_id, file_path=str(table)
+        )
+        assert exported["tools"] == 1
+        text = table.read_text()
+        assert "T7" in text
+        assert "D3" in text
+    finally:
+        cleanup = await bridge.execute_python(
+            "from Path.Tool import cam_assets\n"
+            f"_uris = ({f'toolbitlibrary://{lib_id}'!r}, {f'toolbit://{bit_id}'!r})\n"
+            "for _uri in _uris:\n"
+            "    if cam_assets.exists(_uri):\n"
+            "        cam_assets.delete(_uri)\n"
+            "_result_ = [cam_assets.exists(_uri) for _uri in _uris]\n"
+        )
+        assert cleanup.success, cleanup.error_traceback or cleanup.stderr
+        assert cleanup.result == [False, False]
