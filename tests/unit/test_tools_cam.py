@@ -1,14 +1,18 @@
 """Unit tests for the CAM tools module.
 
-The CAM tools send ``freecad_side/cam_runtime.py`` plus one function call to
-FreeCAD. These tests use a mocked bridge and check the generated code: the
-runtime is included, arguments travel as JSON, modifying tools run inside an
-undo transaction, and every called runtime function exists.
+The CAM tools load ``freecad_side/cam_runtime.py`` into FreeCAD once and then
+send one function call per tool. These tests use a mocked bridge and check
+the generated code: the runtime version is checked, it is loaded in pieces
+small enough for the bridge, arguments travel as JSON, modifying tools run
+inside an undo transaction, and every called runtime function exists.
 """
 
 import ast
+import hashlib
 import json
 import re
+import sys
+import xmlrpc.client
 from collections.abc import Awaitable, Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -17,7 +21,12 @@ import pytest
 
 from freecad_mcp.bridge.base import ExecutionResult
 from freecad_mcp.tools import cam
-from freecad_mcp.tools.cam import build_cam_code, register_cam_tools
+from freecad_mcp.tools.cam import (
+    RUNTIME_MODULE,
+    build_cam_code,
+    build_runtime_load_code,
+    register_cam_tools,
+)
 
 RegisteredTools = dict[str, Callable[..., Awaitable[Any]]]
 
@@ -84,7 +93,7 @@ def _runtime_functions() -> set[str]:
 
 
 def _called_function(code: str) -> str:
-    match = re.search(r"_result_ = (\w+)\(_json\.loads\(", code)
+    match = re.search(r"_result_ = _cam_runtime\.(\w+)\(_json\.loads\(", code)
     assert match, "generated code has no runtime call"
     return match.group(1)
 
@@ -98,9 +107,11 @@ def _payload(code: str) -> dict[str, Any]:
 class TestBuildCamCode:
     """Tests for the code generator shared by all CAM tools."""
 
-    def test_includes_runtime_and_call(self) -> None:
+    def test_checks_runtime_version_and_calls(self) -> None:
         code = build_cam_code("inspect_job", {"job_name": "Job"})
-        assert "def inspect_job(" in code
+        sha = hashlib.sha256(cam._runtime_source().encode("utf-8")).hexdigest()
+        assert repr(sha) in code
+        assert "def inspect_job(" not in code
         assert _called_function(code) == "inspect_job"
         assert _payload(code) == {"job_name": "Job"}
 
@@ -125,6 +136,10 @@ class TestBuildCamCode:
     def test_transaction_uses_active_document_without_doc_name(self) -> None:
         code = build_cam_code("add_operation", {}, "Add Profile")
         assert "_txn_doc = FreeCAD.ActiveDocument" in code
+
+    def test_version_check_comes_before_transaction(self) -> None:
+        code = build_cam_code("add_operation", {}, "Add Profile")
+        assert code.index("raise RuntimeError") < code.index("openTransaction")
 
     def test_read_only_call_has_no_transaction(self) -> None:
         assert "openTransaction" not in build_cam_code("inspect_job", {})
@@ -252,8 +267,8 @@ class TestCamTools:
         await tools["cam_post_process"](use_job_output=True)
         code = bridge.execute_python.call_args.args[0]
         assert _payload(code)["use_job_output"] is True
-        assert "def _write_job_output(" in code
-        assert "FilenameGenerator" in code
+        assert _called_function(code) == "post_process"
+        assert "def _write_job_output(" in cam._runtime_source()
 
     async def test_add_operation_passes_source_operations(
         self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]
@@ -294,7 +309,8 @@ class TestCamTools:
         payload = _payload(code)
         assert payload["apply"] is True
         assert payload["tool_controllers"] == ["TC_17"]
-        assert "write_result_to_tc" in code
+        assert _called_function(code) == "feeds_speeds"
+        assert "write_result_to_tc" in cam._runtime_source()
 
     async def test_simulate_runs_in_a_transaction(
         self, tools_and_bridge: tuple[RegisteredTools, AsyncMock]
@@ -308,6 +324,123 @@ class TestCamTools:
             "resolution": 0.2,
         }
         assert "openTransaction" in code
+
+
+def _run_like_bridge(code: str) -> None:
+    """Run generated code the way the bridge does (fresh namespace)."""
+    exec(compile(code, "<cam>", "exec"), {})  # noqa: S102
+
+
+def _missing_runtime() -> ExecutionResult:
+    return ExecutionResult(
+        success=False,
+        result=None,
+        stdout="",
+        stderr="",
+        execution_time_ms=1.0,
+        error_type="RuntimeError",
+        error_traceback="Traceback ...\nRuntimeError: robust-mcp CAM runtime not loaded",
+    )
+
+
+def _ok(result: Any) -> ExecutionResult:
+    return ExecutionResult(
+        success=True, result=result, stdout="", stderr="", execution_time_ms=1.0
+    )
+
+
+class TestRuntimeLoading:
+    """The runtime is loaded in pieces when FreeCAD doesn't have it (yet)."""
+
+    def test_requests_fit_the_bridge_limit(self) -> None:
+        for code in build_runtime_load_code():
+            request = xmlrpc.client.dumps((code,), "execute").encode("utf-8")
+            assert len(request) < 60 * 1024
+
+    def test_load_code_creates_the_module(self) -> None:
+        source = "VALUE = 41\n\ndef answer(args):\n    return VALUE + args['n']\n"
+        try:
+            for code in build_runtime_load_code(source):
+                _run_like_bridge(code)
+            module = sys.modules[RUNTIME_MODULE]
+            assert module.answer({"n": 1}) == 42
+            assert (
+                hashlib.sha256(source.encode("utf-8")).hexdigest()
+                == module._SOURCE_SHA256
+            )
+            assert RUNTIME_MODULE + "_upload" not in sys.modules
+        finally:
+            sys.modules.pop(RUNTIME_MODULE, None)
+
+    def test_incomplete_upload_is_rejected(self) -> None:
+        codes = build_runtime_load_code("A = 1\n" * 5000)
+        assert len(codes) > 2
+        try:
+            _run_like_bridge(codes[0])
+            with pytest.raises(RuntimeError, match="incomplete"):
+                _run_like_bridge(codes[-1])
+            assert RUNTIME_MODULE not in sys.modules
+        finally:
+            sys.modules.pop(RUNTIME_MODULE + "_upload", None)
+            sys.modules.pop(RUNTIME_MODULE, None)
+
+    def test_broken_runtime_is_not_registered(self) -> None:
+        try:
+            for code in build_runtime_load_code("raise ValueError('boom')\n")[:-1]:
+                _run_like_bridge(code)
+            with pytest.raises(ValueError, match="boom"):
+                _run_like_bridge(
+                    build_runtime_load_code("raise ValueError('boom')\n")[-1]
+                )
+            assert RUNTIME_MODULE not in sys.modules
+        finally:
+            sys.modules.pop(RUNTIME_MODULE, None)
+
+    async def test_missing_runtime_is_loaded_and_call_retried(self) -> None:
+        loads = build_runtime_load_code()
+        bridge = AsyncMock()
+        bridge.execute_python = AsyncMock(
+            side_effect=[_missing_runtime()]
+            + [_ok(True)] * len(loads)
+            + [_ok({"ok": True})]
+        )
+        tools: RegisteredTools = {}
+        mcp = MagicMock()
+        mcp.tool = lambda: lambda func: tools.setdefault(func.__name__, func)
+
+        async def get_bridge() -> AsyncMock:
+            return bridge
+
+        register_cam_tools(mcp, get_bridge)
+        assert await tools["cam_inspect_job"]() == {"ok": True}
+        sent = [c.args[0] for c in bridge.execute_python.call_args_list]
+        assert sent[1:-1] == loads
+        assert sent[0] == sent[-1]
+
+    async def test_failed_load_raises(self) -> None:
+        bridge = AsyncMock()
+        bridge.execute_python = AsyncMock(
+            side_effect=[
+                _missing_runtime(),
+                ExecutionResult(
+                    success=False,
+                    result=None,
+                    stdout="",
+                    stderr="<ProtocolError: 413 Request too large>",
+                    execution_time_ms=1.0,
+                ),
+            ]
+        )
+        tools: RegisteredTools = {}
+        mcp = MagicMock()
+        mcp.tool = lambda: lambda func: tools.setdefault(func.__name__, func)
+
+        async def get_bridge() -> AsyncMock:
+            return bridge
+
+        register_cam_tools(mcp, get_bridge)
+        with pytest.raises(ValueError, match="413 Request too large"):
+            await tools["cam_inspect_job"]()
 
 
 def _literal(name: str) -> Any:

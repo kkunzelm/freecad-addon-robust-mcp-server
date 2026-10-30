@@ -1,9 +1,10 @@
 """CAM workbench helpers that run *inside* FreeCAD.
 
 This file is never imported by the MCP server. The CAM tools in
-``freecad_mcp.tools.cam`` read it as text and send it to FreeCAD together
-with a single function call, so all FreeCAD API usage lives here, in one
-lintable module, instead of being spread over f-string snippets.
+``freecad_mcp.tools.cam`` read it as text, load it into FreeCAD once as
+module ``_robust_mcp_cam_runtime`` and then send single function calls, so
+all FreeCAD API usage lives here, in one lintable module, instead of being
+spread over f-string snippets.
 
 Design notes:
 

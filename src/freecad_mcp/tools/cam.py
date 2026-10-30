@@ -9,10 +9,13 @@ through ``cam_describe_type``/``cam_get_properties``/``cam_set_properties``,
 which read FreeCAD's own property metadata (types, enumerations, tooltips).
 
 All FreeCAD-side code lives in ``freecad_mcp/freecad_side/cam_runtime.py``.
-Each tool sends that module plus one function call; arguments travel as JSON,
-so no user value is ever pasted into Python source.
+That module is larger than one bridge request may be, so it is loaded into
+FreeCAD once per session in pieces and kept there as a module, checked by its
+SHA-256. Each tool then sends one short function call; arguments travel as
+JSON, so no user value is ever pasted into Python source.
 """
 
+import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -40,12 +43,31 @@ def _runtime_source() -> str:
 CAM_TIMEOUT_MS = 600_000
 
 
+# Name of the module that holds the runtime inside FreeCAD, and the error a
+# call raises when that module is missing or outdated (FreeCAD restarted, or
+# cam_runtime.py was edited): the tools then load the runtime and retry.
+RUNTIME_MODULE = "_robust_mcp_cam_runtime"
+_RUNTIME_MISSING = "robust-mcp CAM runtime not loaded"
+
+# Characters of runtime source per load request; the bridge rejects requests
+# over 64 KiB, and XML escaping can make the source grow.
+RUNTIME_CHUNK_CHARS = 16_000
+
+
+def _runtime_sha256(source: str) -> str:
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
 def build_cam_code(
     func: str,
     args: dict[str, Any],
     transaction: str | None = None,
 ) -> str:
     """Build the Python code that runs one CAM runtime function in FreeCAD.
+
+    The code expects the runtime loaded by ``build_runtime_load_code``; if it
+    is missing or differs from the local ``cam_runtime.py``, it raises a
+    RuntimeError before opening any transaction.
 
     Args:
         func: Name of a function defined in ``cam_runtime.py``.
@@ -60,7 +82,17 @@ def build_cam_code(
         >>> code = build_cam_code("inspect_job", {"job_name": "Job"})
     """
     payload = json.dumps(args)
-    call = f"import json as _json\n_result_ = {func}(_json.loads({payload!r}))\n"
+    sha = _runtime_sha256(_runtime_source())
+    check = (
+        "import sys as _sys\n"
+        f"_cam_runtime = _sys.modules.get({RUNTIME_MODULE!r})\n"
+        f"if getattr(_cam_runtime, '_SOURCE_SHA256', None) != {sha!r}:\n"
+        f"    raise RuntimeError({_RUNTIME_MISSING!r})\n"
+    )
+    call = (
+        "import json as _json\n"
+        f"_result_ = _cam_runtime.{func}(_json.loads({payload!r}))\n"
+    )
     if transaction:
         doc_name = args.get("doc_name")
         doc_expr = (
@@ -69,7 +101,55 @@ def build_cam_code(
             else "FreeCAD.ActiveDocument"
         )
         call = wrap_with_transaction(call, transaction, doc_expr=doc_expr)
-    return _runtime_source() + "\n\n" + call
+    return check + call
+
+
+def build_runtime_load_code(source: str | None = None) -> list[str]:
+    """Build the requests that load ``cam_runtime.py`` into FreeCAD.
+
+    The source travels as plain string literals in pieces small enough for
+    the bridge. The last request checks the SHA-256 of the joined pieces,
+    executes them as module ``RUNTIME_MODULE`` and registers it in
+    ``sys.modules``, replacing an older version.
+
+    Args:
+        source: Runtime source; defaults to the local ``cam_runtime.py``.
+
+    Returns:
+        Python sources to run in order with the bridge's ``execute_python``.
+    """
+    source = _runtime_source() if source is None else source
+    sha = _runtime_sha256(source)
+    upload = RUNTIME_MODULE + "_upload"
+    chunks = [
+        source[i : i + RUNTIME_CHUNK_CHARS]
+        for i in range(0, len(source), RUNTIME_CHUNK_CHARS)
+    ]
+    codes = []
+    for index, chunk in enumerate(chunks):
+        reset = "_up.parts = []\n" if index == 0 else ""
+        codes.append(
+            "import sys as _sys, types as _types\n"
+            f"_up = _sys.modules.setdefault({upload!r}, _types.ModuleType({upload!r}))\n"
+            f"{reset}_up.parts.append({chunk!r})\n"
+            "_result_ = len(_up.parts)\n"
+        )
+    codes.append(
+        "import hashlib as _hashlib, sys as _sys, types as _types\n"
+        f"_src = ''.join(_sys.modules.pop({upload!r}).parts)\n"
+        f"if _hashlib.sha256(_src.encode('utf-8')).hexdigest() != {sha!r}:\n"
+        "    raise RuntimeError('CAM runtime upload incomplete')\n"
+        f"_mod = _types.ModuleType({RUNTIME_MODULE!r})\n"
+        f"_mod._SOURCE_SHA256 = {sha!r}\n"
+        f"_sys.modules[{RUNTIME_MODULE!r}] = _mod\n"
+        "try:\n"
+        "    exec(compile(_src, 'cam_runtime.py', 'exec'), _mod.__dict__)\n"
+        "except BaseException:\n"
+        f"    del _sys.modules[{RUNTIME_MODULE!r}]\n"
+        "    raise\n"
+        "_result_ = True\n"
+    )
+    return codes
 
 
 def _drop_none(args: dict[str, Any]) -> dict[str, Any]:
@@ -78,7 +158,7 @@ def _drop_none(args: dict[str, Any]) -> dict[str, Any]:
 
 def _error_message(result: Any) -> str:
     """Shorten a FreeCAD traceback to its final error line plus the traceback."""
-    tb = result.error_traceback or "CAM operation failed"
+    tb = result.error_traceback or result.stderr or "CAM operation failed"
     last = tb.strip().splitlines()[-1] if tb.strip() else tb
     return f"{last}\n\n{tb}"
 
@@ -102,10 +182,14 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
         func: str, args: dict[str, Any], transaction: str | None = None
     ) -> Any:
         bridge = await get_bridge()
-        result = await bridge.execute_python(
-            build_cam_code(func, _drop_none(args), transaction),
-            timeout_ms=CAM_TIMEOUT_MS,
-        )
+        code = build_cam_code(func, _drop_none(args), transaction)
+        result = await bridge.execute_python(code, timeout_ms=CAM_TIMEOUT_MS)
+        if not result.success and _RUNTIME_MISSING in (result.error_traceback or ""):
+            for load in build_runtime_load_code():
+                loaded = await bridge.execute_python(load)
+                if not loaded.success:
+                    raise ValueError(_error_message(loaded))
+            result = await bridge.execute_python(code, timeout_ms=CAM_TIMEOUT_MS)
         if result.success:
             return result.result
         raise ValueError(_error_message(result))
