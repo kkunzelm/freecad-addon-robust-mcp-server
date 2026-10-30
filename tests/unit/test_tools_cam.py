@@ -8,6 +8,7 @@ inside an undo transaction, and every called runtime function exists.
 """
 
 import ast
+import asyncio
 import hashlib
 import json
 import re
@@ -400,7 +401,8 @@ class TestRuntimeLoading:
         loads = build_runtime_load_code()
         bridge = AsyncMock()
         bridge.execute_python = AsyncMock(
-            side_effect=[_missing_runtime()]
+            # first call, re-check under the lock, pieces, retried call
+            side_effect=[_missing_runtime(), _missing_runtime()]
             + [_ok(True)] * len(loads)
             + [_ok({"ok": True})]
         )
@@ -414,13 +416,45 @@ class TestRuntimeLoading:
         register_cam_tools(mcp, get_bridge)
         assert await tools["cam_inspect_job"]() == {"ok": True}
         sent = [c.args[0] for c in bridge.execute_python.call_args_list]
-        assert sent[1:-1] == loads
-        assert sent[0] == sent[-1]
+        assert sent[2:-1] == loads
+        assert sent[0] == sent[1] == sent[-1]
+
+    async def test_concurrent_calls_load_the_runtime_once(self) -> None:
+        loads = build_runtime_load_code()
+        loaded = False
+        load_requests: list[str] = []
+
+        async def execute_python(code: str, timeout_ms: int = 0) -> ExecutionResult:  # noqa: ARG001
+            nonlocal loaded
+            await asyncio.sleep(0)  # let the other call run in between
+            if code in loads:
+                load_requests.append(code)
+                if code == loads[-1]:
+                    loaded = True
+                return _ok(True)
+            return _ok({"ok": True}) if loaded else _missing_runtime()
+
+        bridge = AsyncMock()
+        bridge.execute_python = execute_python
+        tools: RegisteredTools = {}
+        mcp = MagicMock()
+        mcp.tool = lambda: lambda func: tools.setdefault(func.__name__, func)
+
+        async def get_bridge() -> AsyncMock:
+            return bridge
+
+        register_cam_tools(mcp, get_bridge)
+        results = await asyncio.gather(
+            tools["cam_inspect_job"](), tools["cam_get_capabilities"]()
+        )
+        assert results == [{"ok": True}, {"ok": True}]
+        assert load_requests == loads  # one upload, pieces in order
 
     async def test_failed_load_raises(self) -> None:
         bridge = AsyncMock()
         bridge.execute_python = AsyncMock(
             side_effect=[
+                _missing_runtime(),
                 _missing_runtime(),
                 ExecutionResult(
                     success=False,

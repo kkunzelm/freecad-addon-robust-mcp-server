@@ -15,6 +15,7 @@ SHA-256. Each tool then sends one short function call; arguments travel as
 JSON, so no user value is ever pasted into Python source.
 """
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
@@ -156,6 +157,11 @@ def _drop_none(args: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in args.items() if v is not None}
 
 
+def _runtime_missing(result: Any) -> bool:
+    """Whether a call failed because FreeCAD lacks the current runtime."""
+    return not result.success and _RUNTIME_MISSING in (result.error_traceback or "")
+
+
 def _error_message(result: Any) -> str:
     """Shorten a FreeCAD traceback to its final error line plus the traceback."""
     tb = result.error_traceback or result.stderr or "CAM operation failed"
@@ -177,19 +183,29 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
 
             register_cam_tools(mcp, get_bridge)
     """
+    # The load requests share one upload buffer inside FreeCAD, so two
+    # concurrent loads would mix their pieces; only one may run at a time.
+    load_lock = asyncio.Lock()
 
     async def run(
         func: str, args: dict[str, Any], transaction: str | None = None
     ) -> Any:
+        """Call a runtime function, loading the runtime first if it is missing."""
         bridge = await get_bridge()
         code = build_cam_code(func, _drop_none(args), transaction)
         result = await bridge.execute_python(code, timeout_ms=CAM_TIMEOUT_MS)
-        if not result.success and _RUNTIME_MISSING in (result.error_traceback or ""):
-            for load in build_runtime_load_code():
-                loaded = await bridge.execute_python(load)
-                if not loaded.success:
-                    raise ValueError(_error_message(loaded))
-            result = await bridge.execute_python(code, timeout_ms=CAM_TIMEOUT_MS)
+        if _runtime_missing(result):
+            async with load_lock:
+                # Another call may have loaded it while this one waited.
+                result = await bridge.execute_python(code, timeout_ms=CAM_TIMEOUT_MS)
+                if _runtime_missing(result):
+                    for load in build_runtime_load_code():
+                        loaded = await bridge.execute_python(load)
+                        if not loaded.success:
+                            raise ValueError(_error_message(loaded))
+                    result = await bridge.execute_python(
+                        code, timeout_ms=CAM_TIMEOUT_MS
+                    )
         if result.success:
             return result.result
         raise ValueError(_error_message(result))
