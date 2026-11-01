@@ -458,6 +458,8 @@ Always independently review generated G-code and verify it in a suitable machine
 simulator before running it. The included voxel simulation is top-down and
 three-axis only; it does not model feeds, tool holders, or machine collisions.
 Explicit output files are protected from overwrite unless `overwrite=True`.
+New output files respect the process umask and are never world-writable;
+replacing an existing file preserves its permissions.
 Split output is prepared before publication. Replacing multiple existing files
 is not atomic as a group; if publication fails, inspect the output directory
 before using any of the files.

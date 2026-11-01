@@ -2482,7 +2482,7 @@ def _write_output_file(
 def _stage_output_file(path: Any, data: str, newline: str | None) -> Any:
     """Create a temporary file with normal output permissions and complete data."""
     temporary = path.parent / f".freecad-mcp-{secrets.token_hex(16)}.tmp"
-    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o664)
     try:
         if path.exists():
             temporary.chmod(stat.S_IMODE(path.stat().st_mode))

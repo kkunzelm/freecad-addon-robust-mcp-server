@@ -705,3 +705,21 @@ def test_unsupported_atomic_publication_leaves_no_output(
     with pytest.raises(OSError, match="cannot publish G-code atomically"):
         runtime._write_output_file(tmp_path / "job.nc", [("", "G1")], False)
     assert not list(tmp_path.iterdir())
+
+
+def test_new_output_is_not_world_writable_under_permissive_umask(
+    runtime: Any, tmp_path: Path
+) -> None:
+    """A permissive umask cannot make newly exported programs world-writable."""
+    import os
+    import stat
+
+    if os.name == "nt":
+        pytest.skip("POSIX permission bits are unavailable on Windows")
+    old_umask = os.umask(0)
+    try:
+        output = tmp_path / "job.nc"
+        runtime._write_output_file(output, [("", "G1")], False)
+    finally:
+        os.umask(old_umask)
+    assert stat.S_IMODE(output.stat().st_mode) == 0o664
