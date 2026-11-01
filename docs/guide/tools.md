@@ -458,11 +458,17 @@ Always independently review generated G-code and verify it in a suitable machine
 simulator before running it. The included voxel simulation is top-down and
 three-axis only; it does not model feeds, tool holders, or machine collisions.
 Explicit output files are protected from overwrite unless `overwrite=True`.
-New output files respect the process umask and are never world-writable;
-replacing an existing file preserves its permissions.
-Split output is prepared before publication. Replacing multiple existing files
-is not atomic as a group; if publication fails, inspect the output directory
-before using any of the files.
+On POSIX systems, new output files respect the process umask and are never
+world-writable; replacing an existing file preserves its permission bits.
+Replacement creates a new file and does not guarantee preservation of its
+previous owner, group, or access-control list; review those settings when they
+matter to your workflow.
+For secure staging, POSIX output directories must not be writable by other
+users unless the sticky bit is set. If needed, export to a private directory
+and copy the verified program to the destination.
+Split output is prepared before publication. Publication is not atomic as a
+group; if it fails, the error lists files already published. Inspect the output
+directory before using any of the files.
 If a filesystem cannot publish a new file atomically without replacing an
 existing one, select another output location and copy the verified program.
 

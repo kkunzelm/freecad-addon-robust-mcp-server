@@ -607,10 +607,10 @@ def test_split_output_preparation_failure_leaves_no_files(
     assert not list(tmp_path.iterdir())
 
 
-def test_split_output_publication_failure_removes_new_files(
+def test_split_output_publication_failure_reports_published_files(
     runtime: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Roll back newly published files when a later output collides."""
+    """Report earlier outputs without deleting files that may have changed."""
     original = runtime.os.link
     calls = 0
 
@@ -622,11 +622,12 @@ def test_split_output_publication_failure_removes_new_files(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(runtime.os, "link", fail_second)
-    with pytest.raises(FileExistsError, match="publication failed"):
+    with pytest.raises(RuntimeError, match=r"job_first\.nc"):
         runtime._write_output_file(
             tmp_path / "job.nc", [("first", "G1"), ("second", "G2")], True
         )
-    assert not list(tmp_path.iterdir())
+    assert (tmp_path / "job_first.nc").read_text() == "G1"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["job_first.nc"]
 
 
 def test_output_falls_back_when_hard_links_are_unsupported(
@@ -722,4 +723,44 @@ def test_new_output_is_not_world_writable_under_permissive_umask(
         runtime._write_output_file(output, [("", "G1")], False)
     finally:
         os.umask(old_umask)
-    assert stat.S_IMODE(output.stat().st_mode) == 0o664
+    assert stat.S_IMODE(output.stat().st_mode) & 0o002 == 0
+
+
+def test_publication_failure_does_not_delete_replaced_output(
+    runtime: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file replaced by another process survives a later output failure."""
+    original = runtime._publish_no_replace
+    calls = 0
+
+    def replace_then_fail(source: Any, destination: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            first = tmp_path / "job_first.nc"
+            first.unlink()
+            first.write_text("replacement from another process")
+            raise FileExistsError("collision")
+        original(source, destination)
+
+    monkeypatch.setattr(runtime, "_publish_no_replace", replace_then_fail)
+    with pytest.raises(RuntimeError, match=r"job_first\.nc"):
+        runtime._write_output_file(
+            tmp_path / "job.nc", [("first", "G1"), ("second", "G2")], True
+        )
+    assert (tmp_path / "job_first.nc").read_text() == "replacement from another process"
+
+
+def test_rejects_unsafe_shared_output_directory(runtime: Any, tmp_path: Path) -> None:
+    """Prevent other users from replacing staged files in shared directories."""
+    import os
+
+    if os.name == "nt":
+        pytest.skip("POSIX directory permission bits are unavailable on Windows")
+    tmp_path.chmod(0o777)
+    try:
+        with pytest.raises(PermissionError, match="sticky-bit"):
+            runtime._write_output_file(tmp_path / "job.nc", [("", "G1")], False)
+    finally:
+        tmp_path.chmod(0o700)
+    assert not list(tmp_path.iterdir())

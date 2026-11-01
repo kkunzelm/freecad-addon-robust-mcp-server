@@ -2501,7 +2501,9 @@ def _stage_output_file(path: Any, data: str, newline: str | None) -> Any:
         with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as output:
             fd = -1
             output.write(data)
-        temporary.chmod(mode)
+            output.flush()
+            if hasattr(os, "fchmod"):
+                os.fchmod(output.fileno(), mode)
     except BaseException:
         if fd != -1:
             os.close(fd)
@@ -2564,21 +2566,38 @@ def _publish_output_files(outputs: list[Any], overwrite: bool) -> None:
     published: list[Any] = []
     try:
         for path, data, newline in outputs:
+            _validate_output_directory(path.parent)
             staged.append((_stage_output_file(path, data, newline), path))
         for temporary, path in staged:
             if overwrite:
                 temporary.replace(path)
             else:
                 _publish_no_replace(temporary, path)
-                published.append(path)
-    except Exception:
-        if not overwrite:
-            for path in published:
-                path.unlink(missing_ok=True)
+            published.append(path)
+    except Exception as exc:
+        if published:
+            raise RuntimeError(
+                f"CAM output publication failed after these files were published: "
+                f"{[str(path) for path in published]}. Inspect the output directory "
+                "before using any programs."
+            ) from exc
         raise
     finally:
         for temporary, _ in staged:
             temporary.unlink(missing_ok=True)
+
+
+def _validate_output_directory(directory: Any) -> None:
+    """Reject POSIX directories where other users can replace staged files."""
+    if os.name == "nt":
+        return
+    permissions = directory.stat().st_mode
+    if permissions & 0o022 and not permissions & stat.S_ISVTX:
+        raise PermissionError(
+            f"Output directory {directory} is writable by other users without "
+            "sticky-bit protection; choose a private directory and copy the "
+            "verified program afterwards"
+        )
 
 
 def _write_job_output(
