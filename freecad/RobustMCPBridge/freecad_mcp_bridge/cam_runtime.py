@@ -24,7 +24,9 @@ from __future__ import annotations
 import importlib
 import math
 import os
-import tempfile
+import secrets
+import shutil
+import stat
 import traceback
 import warnings
 from pathlib import Path as FsPath
@@ -2475,30 +2477,46 @@ def _write_output_file(
     return [str(path) for path in paths]
 
 
+def _stage_output_file(path: Any, data: str, newline: str | None) -> Any:
+    """Create a temporary file with normal output permissions and complete data."""
+    temporary = path.parent / f".freecad-mcp-{secrets.token_hex(16)}.tmp"
+    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    try:
+        if path.exists():
+            temporary.chmod(stat.S_IMODE(path.stat().st_mode))
+        with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as output:
+            fd = -1
+            output.write(data)
+    except BaseException:
+        if fd != -1:
+            os.close(fd)
+        temporary.unlink(missing_ok=True)
+        raise
+    return temporary
+
+
 def _publish_output_files(outputs: list[Any], overwrite: bool) -> None:
     """Stage all content before publishing; remove temporary files on failure."""
     staged: list[tuple[Any, Any]] = []
     published: list[Any] = []
     try:
         for path, data, newline in outputs:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                newline=newline,
-                dir=path.parent,
-                delete=False,
-            ) as output:
-                temporary = FsPath(output.name)
-                staged.append((temporary, path))
-                output.write(data)
+            staged.append((_stage_output_file(path, data, newline), path))
         for temporary, path in staged:
             if overwrite:
                 temporary.replace(path)
             else:
-                # Linking creates the destination only if it does not exist,
-                # including if another process creates it after the preflight.
-                os.link(temporary, path)
-                published.append(path)
+                try:
+                    os.link(temporary, path)
+                    published.append(path)
+                except FileExistsError:
+                    raise
+                except OSError:
+                    # FAT and some network shares do not support hard links.
+                    # Exclusive creation still prevents replacing another file.
+                    with temporary.open("rb") as source, path.open("xb") as target:
+                        published.append(path)
+                        shutil.copyfileobj(source, target)
     except Exception:
         if not overwrite:
             for path in published:

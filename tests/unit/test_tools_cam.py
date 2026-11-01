@@ -542,6 +542,7 @@ def test_post_process_requires_active_operations(runtime: Any) -> None:
 def test_embedded_cam_finds_workbench_in_active_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Find the workbench in the profile without importing its startup code."""
     from freecad_mcp.bridge.embedded import EmbeddedBridge
 
     workbench = tmp_path / "Mod/RobustMCPBridge/freecad/RobustMCPBridge"
@@ -564,6 +565,7 @@ def test_embedded_cam_finds_workbench_in_active_profile(
 
 
 def test_embedded_cam_rejects_ambiguous_profile_installations(tmp_path: Path) -> None:
+    """Reject multiple profile installations instead of guessing which to load."""
     from freecad_mcp.bridge.embedded import EmbeddedBridge
 
     for name in ("first", "second"):
@@ -586,7 +588,8 @@ def test_embedded_cam_rejects_ambiguous_profile_installations(tmp_path: Path) ->
 def test_split_output_preparation_failure_leaves_no_files(
     runtime: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original = runtime.tempfile.NamedTemporaryFile
+    """Clean staged files when preparing a later output fails."""
+    original = runtime._stage_output_file
     calls = 0
 
     def fail_second(*args: Any, **kwargs: Any) -> Any:
@@ -596,7 +599,7 @@ def test_split_output_preparation_failure_leaves_no_files(
             raise OSError("disk full")
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(runtime.tempfile, "NamedTemporaryFile", fail_second)
+    monkeypatch.setattr(runtime, "_stage_output_file", fail_second)
     with pytest.raises(OSError, match="disk full"):
         runtime._write_output_file(
             tmp_path / "job.nc", [("first", "G1"), ("second", "G2")], True
@@ -607,6 +610,7 @@ def test_split_output_preparation_failure_leaves_no_files(
 def test_split_output_publication_failure_removes_new_files(
     runtime: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Roll back newly published files when a later output collides."""
     original = runtime.os.link
     calls = 0
 
@@ -614,12 +618,60 @@ def test_split_output_publication_failure_removes_new_files(
         nonlocal calls
         calls += 1
         if calls == 2:
-            raise OSError("publication failed")
+            raise FileExistsError("publication failed")
         return original(*args, **kwargs)
 
     monkeypatch.setattr(runtime.os, "link", fail_second)
-    with pytest.raises(OSError, match="publication failed"):
+    with pytest.raises(FileExistsError, match="publication failed"):
         runtime._write_output_file(
             tmp_path / "job.nc", [("first", "G1"), ("second", "G2")], True
         )
     assert not list(tmp_path.iterdir())
+
+
+def test_output_falls_back_when_hard_links_are_unsupported(
+    runtime: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exclusive creation supports filesystems that cannot create hard links."""
+
+    def unsupported(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("hard links unsupported")
+
+    monkeypatch.setattr(runtime.os, "link", unsupported)
+    path = tmp_path / "job.nc"
+    runtime._write_output_file(path, [("", "G1 X1")], False)
+    assert path.read_text() == "G1 X1"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["job.nc"]
+
+
+def test_output_overwrite_preserves_existing_permissions(
+    runtime: Any, tmp_path: Path
+) -> None:
+    """Replacing a program preserves its existing access permissions."""
+    import os
+    import stat
+
+    if os.name == "nt":
+        pytest.skip("POSIX permission bits are unavailable on Windows")
+    path = tmp_path / "job.nc"
+    path.write_text("old")
+    path.chmod(0o640)
+    runtime._write_output_file(path, [("", "new")], False, overwrite=True)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert path.read_text() == "new"
+
+
+def test_new_output_matches_normal_file_permissions(
+    runtime: Any, tmp_path: Path
+) -> None:
+    """New programs use the same umask-adjusted mode as ordinary files."""
+    import os
+    import stat
+
+    if os.name == "nt":
+        pytest.skip("POSIX permission bits are unavailable on Windows")
+    baseline = tmp_path / "baseline"
+    baseline.write_text("baseline")
+    output = tmp_path / "job.nc"
+    runtime._write_output_file(output, [("", "G1")], False)
+    assert stat.S_IMODE(output.stat().st_mode) == stat.S_IMODE(baseline.stat().st_mode)
