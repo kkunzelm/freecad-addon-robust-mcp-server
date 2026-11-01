@@ -2482,13 +2482,26 @@ def _write_output_file(
 def _stage_output_file(path: Any, data: str, newline: str | None) -> Any:
     """Create a temporary file with normal output permissions and complete data."""
     temporary = path.parent / f".freecad-mcp-{secrets.token_hex(16)}.tmp"
-    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o664)
+    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
         if path.exists():
-            temporary.chmod(stat.S_IMODE(path.stat().st_mode))
+            mode = stat.S_IMODE(path.stat().st_mode)
+        else:
+            # Determine the process umask without changing it: umask is global
+            # to the FreeCAD process, so temporarily setting it is unsafe.
+            probe = temporary.with_suffix(".permissions")
+            probe_created = False
+            try:
+                with probe.open("x") as probe_file:
+                    probe_created = True
+                    mode = stat.S_IMODE(os.fstat(probe_file.fileno()).st_mode) & 0o664
+            finally:
+                if probe_created:
+                    probe.unlink(missing_ok=True)
         with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as output:
             fd = -1
             output.write(data)
+        temporary.chmod(mode)
     except BaseException:
         if fd != -1:
             os.close(fd)
