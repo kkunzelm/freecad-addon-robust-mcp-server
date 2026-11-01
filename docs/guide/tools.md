@@ -423,9 +423,10 @@ returns PNG data encoded as base64 in `data`; it does not accept a file path.
 
 ## CAM Tools
 
-Build CAM jobs and G-code without dialogs. Every operation and dressup type
-of the CAM workbench is supported; `cam_describe_type` lists all options of a
-type with defaults and allowed values.
+Build CAM jobs and G-code without dialogs. Available operations and dressups
+depend on the FreeCAD version and GUI availability; use `cam_get_capabilities`
+and `cam_describe_type` to discover the options. CAM requires a compatible
+Robust MCP Bridge workbench; update it and restart FreeCAD if requested.
 
 | Tool                         | Description                                                                        |
 | ---------------------------- | ---------------------------------------------------------------------------------- |
@@ -453,7 +454,10 @@ type with defaults and allowed values.
 | `cam_import_tool_library`    | Import a .fctl or Camotics .json tool library with its tool bits                   |
 | `cam_export_tool_library`    | Export a tool library as .fctl, Camotics .json or LinuxCNC .tbl                    |
 
-Always check generated G-code in a simulator before running it on a machine.
+Always independently review generated G-code and verify it in a suitable machine
+simulator before running it. The included voxel simulation is top-down and
+three-axis only; it does not model feeds, tool holders, or machine collisions.
+Explicit output files are protected from overwrite unless `overwrite=True`.
 
 `cam_post_process(use_job_output=True)` writes the files where FreeCAD's Post
 Process command would, named by the job's output pattern
@@ -471,7 +475,8 @@ fallback to the material's generic surface speed; `"none"` turns it off.
 
 `cam_add_operation` also creates Comment, Stop, Copy, Array and SimpleCopy
 (`source_operations=[...]`); `cam_add_dressup` also Boundary2, Mirror and
-PlungeMilling (FreeCAD 26.3+, GUI only). `cam_simulate` uses FreeCAD's voxel
+PlungeMilling (FreeCAD 26.3+, GUI only). LeadInOut, RampEntry, Dragknife,
+AxisMap and ZCorrect also require the GUI. `cam_simulate` uses FreeCAD's voxel
 simulator (3-axis, from above).
 
 FreeCAD versions: the CAM tools are tested with FreeCAD 1.0, 1.1, 26.3 and

@@ -8,56 +8,19 @@ reachable through ``cam_add_operation``/``cam_add_dressup``, and every option
 through ``cam_describe_type``/``cam_get_properties``/``cam_set_properties``,
 which read FreeCAD's own property metadata (types, enumerations, tooltips).
 
-All FreeCAD-side code lives in ``freecad_mcp/freecad_side/cam_runtime.py``.
-That module is larger than one bridge request may be, so it is loaded into
-FreeCAD once per session in pieces and kept there as a module, checked by its
-SHA-256. Each tool then sends one short function call; arguments travel as
-JSON, so no user value is ever pasted into Python source.
+The CAM implementation is installed with the FreeCAD bridge. Requests use a
+versioned, allowlisted dispatcher inside FreeCAD; an outdated bridge reports
+an actionable error without affecting other tools.
 """
 
-import asyncio
-import hashlib
 import json
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import Any
 
 from freecad_mcp.tools.utils import wrap_with_transaction
 
-_RUNTIME_PATH = (
-    Path(__file__).resolve().parent.parent / "freecad_side" / "cam_runtime.py"
-)
-
-
-def _runtime_source() -> str:
-    """Return the FreeCAD-side CAM runtime source.
-
-    Returns:
-        The source code of ``cam_runtime.py``. Read on every call so edits in
-        a development checkout apply after reconnecting the MCP server.
-    """
-    return _RUNTIME_PATH.read_text(encoding="utf-8")
-
-
-# 3D operations (Surface, Waterline, PlanarSurface) and simulations can compute
-# for minutes; the bridge's 30 s default would give up while FreeCAD keeps going.
 CAM_TIMEOUT_MS = 600_000
-
-
-# Name of the module that holds the runtime inside FreeCAD, and the error a
-# call raises when that module is missing or outdated (FreeCAD restarted, or
-# cam_runtime.py was edited): the tools then load the runtime and retry.
-RUNTIME_MODULE = "_robust_mcp_cam_runtime"
-_RUNTIME_MISSING = "robust-mcp CAM runtime not loaded"
-
-# Characters of runtime source per load request; the bridge rejects requests
-# over 64 KiB, and XML escaping can make the source grow.
-RUNTIME_CHUNK_CHARS = 16_000
-
-
-def _runtime_sha256(source: str) -> str:
-    """SHA-256 of the runtime source, its version check inside FreeCAD."""
-    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+CAM_API_VERSION = 1
 
 
 def build_cam_code(
@@ -65,35 +28,17 @@ def build_cam_code(
     args: dict[str, Any],
     transaction: str | None = None,
 ) -> str:
-    """Build the Python code that runs one CAM runtime function in FreeCAD.
-
-    The code expects the runtime loaded by ``build_runtime_load_code``; if it
-    is missing or differs from the local ``cam_runtime.py``, it raises a
-    RuntimeError before opening any transaction.
-
-    Args:
-        func: Name of a function defined in ``cam_runtime.py``.
-        args: JSON-serializable arguments passed to that function as a dict.
-        transaction: Undo transaction name for modifying calls, None for
-            read-only calls.
-
-    Returns:
-        Python source for the bridge's ``execute_python``.
-
-    Example:
-        >>> code = build_cam_code("inspect_job", {"job_name": "Job"})
-    """
+    """Build a versioned CAM dispatcher call with JSON-encoded arguments."""
     payload = json.dumps(args)
-    sha = _runtime_sha256(_runtime_source())
     check = (
-        "import sys as _sys\n"
-        f"_cam_runtime = _sys.modules.get({RUNTIME_MODULE!r})\n"
-        f"if getattr(_cam_runtime, '_SOURCE_SHA256', None) != {sha!r}:\n"
-        f"    raise RuntimeError({_RUNTIME_MISSING!r})\n"
+        "import json as _json\n"
+        "if '_robust_mcp_cam_dispatch' not in globals():\n"
+        "    raise RuntimeError('CAM requires an updated Robust MCP Bridge; "
+        "install the latest workbench and restart FreeCAD')\n"
     )
     call = (
-        "import json as _json\n"
-        f"_result_ = _cam_runtime.{func}(_json.loads({payload!r}))\n"
+        f"_result_ = _robust_mcp_cam_dispatch({CAM_API_VERSION!r}, "
+        f"{func!r}, _json.loads({payload!r}))\n"
     )
     if transaction:
         doc_name = args.get("doc_name")
@@ -106,62 +51,9 @@ def build_cam_code(
     return check + call
 
 
-def build_runtime_load_code(source: str | None = None) -> list[str]:
-    """Build the requests that load ``cam_runtime.py`` into FreeCAD.
-
-    The source travels as plain string literals in pieces small enough for
-    the bridge. The last request checks the SHA-256 of the joined pieces,
-    executes them as module ``RUNTIME_MODULE`` and registers it in
-    ``sys.modules``, replacing an older version.
-
-    Args:
-        source: Runtime source; defaults to the local ``cam_runtime.py``.
-
-    Returns:
-        Python sources to run in order with the bridge's ``execute_python``.
-    """
-    source = _runtime_source() if source is None else source
-    sha = _runtime_sha256(source)
-    upload = RUNTIME_MODULE + "_upload"
-    chunks = [
-        source[i : i + RUNTIME_CHUNK_CHARS]
-        for i in range(0, len(source), RUNTIME_CHUNK_CHARS)
-    ]
-    codes = []
-    for index, chunk in enumerate(chunks):
-        reset = "_up.parts = []\n" if index == 0 else ""
-        codes.append(
-            "import sys as _sys, types as _types\n"
-            f"_up = _sys.modules.setdefault({upload!r}, _types.ModuleType({upload!r}))\n"
-            f"{reset}_up.parts.append({chunk!r})\n"
-            "_result_ = len(_up.parts)\n"
-        )
-    codes.append(
-        "import hashlib as _hashlib, sys as _sys, types as _types\n"
-        f"_src = ''.join(_sys.modules.pop({upload!r}).parts)\n"
-        f"if _hashlib.sha256(_src.encode('utf-8')).hexdigest() != {sha!r}:\n"
-        "    raise RuntimeError('CAM runtime upload incomplete')\n"
-        f"_mod = _types.ModuleType({RUNTIME_MODULE!r})\n"
-        f"_mod._SOURCE_SHA256 = {sha!r}\n"
-        f"_sys.modules[{RUNTIME_MODULE!r}] = _mod\n"
-        "try:\n"
-        "    exec(compile(_src, 'cam_runtime.py', 'exec'), _mod.__dict__)\n"
-        "except BaseException:\n"
-        f"    del _sys.modules[{RUNTIME_MODULE!r}]\n"
-        "    raise\n"
-        "_result_ = True\n"
-    )
-    return codes
-
-
 def _drop_none(args: dict[str, Any]) -> dict[str, Any]:
     """Leave out arguments that were not given, so the runtime's defaults apply."""
     return {k: v for k, v in args.items() if v is not None}
-
-
-def _runtime_missing(result: Any) -> bool:
-    """Whether a call failed because FreeCAD lacks the current runtime."""
-    return not result.success and _RUNTIME_MISSING in (result.error_traceback or "")
 
 
 def _error_message(result: Any) -> str:
@@ -185,29 +77,14 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
 
             register_cam_tools(mcp, get_bridge)
     """
-    # The load requests share one upload buffer inside FreeCAD, so two
-    # concurrent loads would mix their pieces; only one may run at a time.
-    load_lock = asyncio.Lock()
 
     async def run(
         func: str, args: dict[str, Any], transaction: str | None = None
     ) -> Any:
-        """Call a runtime function, loading the runtime first if it is missing."""
+        """Call the installed bridge's versioned CAM dispatcher."""
         bridge = await get_bridge()
         code = build_cam_code(func, _drop_none(args), transaction)
         result = await bridge.execute_python(code, timeout_ms=CAM_TIMEOUT_MS)
-        if _runtime_missing(result):
-            async with load_lock:
-                # Another call may have loaded it while this one waited.
-                result = await bridge.execute_python(code, timeout_ms=CAM_TIMEOUT_MS)
-                if _runtime_missing(result):
-                    for load in build_runtime_load_code():
-                        loaded = await bridge.execute_python(load)
-                        if not loaded.success:
-                            raise ValueError(_error_message(loaded))
-                    result = await bridge.execute_python(
-                        code, timeout_ms=CAM_TIMEOUT_MS
-                    )
         if result.success:
             return result.result
         raise ValueError(_error_message(result))
@@ -817,6 +694,7 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
         use_job_output: bool = False,
         return_lines: int = 0,
         doc_name: str | None = None,
+        overwrite: bool = False,
     ) -> dict[str, Any]:
         """Post-process a job to G-code and optionally write it to a file.
 
@@ -836,6 +714,7 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
             post_args: Legacy post processor arguments (replaces the job's
                 setting). Not allowed for jobs with a machine.
             output_file: File to write. Nothing is written if None.
+            overwrite: Replace an existing explicit output_file when true.
             split_files: When the job splits its output (Job.SplitOutput),
                 write one file per section as <name>_<section><ext>.
             use_job_output: Write the files exactly where FreeCAD's Post
@@ -862,6 +741,7 @@ def register_cam_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> No
                 "use_job_output": use_job_output,
                 "return_lines": return_lines,
                 "doc_name": doc_name,
+                "overwrite": overwrite,
             },
             "Post Process CAM Job",
         )

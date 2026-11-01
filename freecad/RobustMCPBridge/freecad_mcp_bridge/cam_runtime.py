@@ -1,10 +1,7 @@
 """CAM workbench helpers that run *inside* FreeCAD.
 
-This file is never imported by the MCP server. The CAM tools in
-``freecad_mcp.tools.cam`` read it as text, load it into FreeCAD once as
-module ``_robust_mcp_cam_runtime`` and then send single function calls, so
-all FreeCAD API usage lives here, in one lintable module, instead of being
-spread over f-string snippets.
+This module is installed with the bridge and runs inside FreeCAD. The
+versioned dispatcher exposes only the CAM operations listed below.
 
 Design notes:
 
@@ -36,7 +33,7 @@ import FreeCAD
 try:
     import FreeCADGui
 except ImportError:  # FreeCADCmd / headless
-    FreeCADGui = None
+    FreeCADGui = None  # type: ignore[assignment]
 
 
 def _gui() -> bool:
@@ -1527,6 +1524,7 @@ def add_operation(args: dict[str, Any]) -> dict[str, Any]:
     _attach_op_vp(op, gui_name)
     report = _set_props(doc, job, op, values, args.get("expressions"))
     doc.recompute()
+    _validate_object_state(op)
     return {
         "name": op.Name,
         "label": op.Label,
@@ -1740,6 +1738,7 @@ def set_properties(args: dict[str, Any]) -> dict[str, Any]:
     report = _set_props(doc, job, obj, args.get("values"), args.get("expressions"))
     if args.get("recompute", True):
         doc.recompute()
+        _validate_object_state(obj)
     out: dict[str, Any] = {"name": obj.Name, "label": obj.Label, "set": report}
     if _op_kind(obj) in ("operation", "dressup") and job is not None:
         out["path"] = path_summary(obj, job)
@@ -2172,6 +2171,23 @@ def _compare_with_model(
     }
 
 
+def _simulation_resolution(requested: Any, width: float, height: float) -> float:
+    """Validate the voxel spacing and limit the top-down simulation grid."""
+    maxlen = max(width, height)
+    res = (
+        float(requested) if requested is not None else min(0.5, max(0.05, maxlen / 400))
+    )
+    if not all(math.isfinite(value) and value > 0 for value in (res, width, height)):
+        raise ValueError(
+            "Simulation resolution and stock dimensions must be positive and finite"
+        )
+    if (width / res) * (height / res) > 4_000_000:
+        raise ValueError(
+            "Simulation resolution is too fine for the stock size; increase resolution"
+        )
+    return res
+
+
 def simulate(args: dict[str, Any]) -> dict[str, Any]:
     """Cut the stock along the job's toolpaths (FreeCAD's voxel simulator)."""
     import time
@@ -2191,7 +2207,7 @@ def simulate(args: dict[str, Any]) -> dict[str, Any]:
     stock = job.Stock.Shape
     sb = stock.BoundBox
     maxlen = max(sb.XLength, sb.YLength)
-    res = float(args.get("resolution") or min(0.5, max(0.05, maxlen / 400)))
+    res = _simulation_resolution(args.get("resolution"), sb.XLength, sb.YLength)
     t0 = time.time()
     sim = PathSimulator.PathSim()
     sim.BeginSimulation(stock, res)
@@ -2330,6 +2346,7 @@ def post_process(args: dict[str, Any]) -> dict[str, Any]:
     job = _job(doc, args.get("job_name"))
     machine_name, post_name = _select_post(job, args)
     doc.recompute()
+    _validate_post_operations(job)
     post = PostProcessorFactory.get_post_processor(job, post_name)
     if post is None or not hasattr(post, "export"):  # 26.3 returns a CAMError
         raise ValueError(f"Post processor {post_name!r} could not be loaded: {post}")
@@ -2348,7 +2365,10 @@ def post_process(args: dict[str, Any]) -> dict[str, Any]:
         files = _write_job_output(job, sections, extension)
     elif output:
         files = _write_output_file(
-            FsPath(output), sections, args.get("split_files", True)
+            FsPath(output),
+            sections,
+            args.get("split_files", True),
+            args.get("overwrite", False),
         )
     gcode = "".join(g for _n, g in sections if g)
     out: dict[str, Any] = {
@@ -2366,6 +2386,32 @@ def post_process(args: dict[str, Any]) -> dict[str, Any]:
         out["gcode"] = lines[:max_lines]
         out["gcode_truncated"] = len(lines) > max_lines
     return out
+
+
+def _validate_object_state(obj: Any) -> None:
+    """Reject an object that FreeCAD reports as invalid after recomputation."""
+    state = set(getattr(obj, "State", ()))
+    if state.intersection({"Invalid", "Error"}) or (
+        callable(getattr(obj, "isValid", None)) and not obj.isValid()
+    ):
+        raise ValueError(
+            f"Object {obj.Label!r} failed recomputation; inspect it before continuing"
+        )
+
+
+def _validate_post_operations(job: Any) -> None:
+    """Reject active operations that failed recompute or have no cutting path."""
+    active = [op for op in job.Operations.Group if getattr(op, "Active", True)]
+    if not active:
+        raise ValueError("The CAM job has no active operations to post-process")
+    for op in active:
+        _validate_object_state(op)
+        if "ToolController" in getattr(op, "PropertiesList", ()):
+            path = getattr(op, "Path", None)
+            if path is None or not getattr(path, "Commands", ()):
+                raise ValueError(
+                    f"Operation {op.Label!r} has no toolpath; inspect it before post-processing"
+                )
 
 
 def _select_post(job: Any, args: dict[str, Any]) -> tuple[str, str]:
@@ -2396,22 +2442,37 @@ def _select_post(job: Any, args: dict[str, Any]) -> tuple[str, str]:
     return "", job.PostProcessor
 
 
-def _write_output_file(out_path: Any, sections: list[Any], split: bool) -> list[str]:
+def _write_output_file(
+    out_path: Any, sections: list[Any], split: bool, overwrite: bool = False
+) -> list[str]:
     """Write to the given file, or one <name>_<section> file per section."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     if len(sections) == 1 or not split:
-        out_path.write_text("".join(g for _n, g in sections if g))
-        return [str(out_path)]
-    files = []
-    for name, g in sections:
-        path = (
-            out_path.with_name(f"{out_path.stem}_{name}{out_path.suffix}")
-            if name
-            else out_path
-        )
-        path.write_text(g or "")
-        files.append(str(path))
-    return files
+        outputs = [(out_path, "".join(g for _n, g in sections if g))]
+    else:
+        outputs = [
+            (
+                out_path.with_name(f"{out_path.stem}_{name}{out_path.suffix}")
+                if name
+                else out_path,
+                g or "",
+            )
+            for name, g in sections
+        ]
+    paths = [path for path, _ in outputs]
+    if len(set(paths)) != len(paths):
+        raise ValueError("Post processor sections resolve to duplicate output files")
+    for path in paths:
+        if path.is_symlink():
+            raise ValueError(f"Refusing to write through a symbolic link: {path}")
+        if path.exists() and not overwrite:
+            raise FileExistsError(
+                f"Output already exists: {path}; pass overwrite=True to replace it"
+            )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    for path, data in outputs:
+        with path.open("w" if overwrite else "x", encoding="utf-8") as output:
+            output.write(data)
+    return [str(path) for path in paths]
 
 
 def _write_job_output(
@@ -2438,7 +2499,7 @@ def _write_job_output(
     ):
         raise RuntimeError(FREECAD_BUGS["output-filename-subpart"])
     names = generator.generate_filenames()
-    files = []
+    outputs = []
     for subpart, gcode in sections:
         if gcode is None:  # the post processor asked for no file
             continue
@@ -2450,6 +2511,14 @@ def _write_job_output(
                 f"relative path {str(path)!r} (an unsaved document has no folder "
                 "for %D); save the document or pass output_file"
             )
+        outputs.append((path, gcode))
+    paths = [path for path, _ in outputs]
+    if len(set(paths)) != len(paths):
+        raise ValueError("Post processor sections resolve to duplicate output files")
+    for path in paths:
+        if path.is_symlink():
+            raise ValueError(f"Refusing to write through a symbolic link: {path}")
+    for path, gcode in outputs:
         path.parent.mkdir(parents=True, exist_ok=True)
         # line ends as in FreeCAD's Post Process command: a leading "\n\n" or a
         # "\r" means write unchanged, otherwise "\n" becomes the system's line end
@@ -2459,8 +2528,7 @@ def _write_job_output(
             path.write_text(gcode, newline="")
         else:
             path.write_text(gcode)
-        files.append(str(path))
-    return files
+    return [str(path) for path in paths]
 
 
 def export_job_template(args: dict[str, Any]) -> dict[str, Any]:
@@ -2496,3 +2564,47 @@ def export_job_template(args: dict[str, Any]) -> dict[str, Any]:
         )
     path.write_text(json.dumps(attrs, sort_keys=True, indent=2))
     return {"file": str(path), "keys": sorted(attrs)}
+
+
+CAM_API_VERSION = 1
+_CAM_OPERATIONS = frozenset(
+    (
+        "capabilities",
+        "list_tools",
+        "analyze_model",
+        "create_job",
+        "set_stock",
+        "add_tool_controller",
+        "feeds_speeds",
+        "remove_tool_controller",
+        "add_operation",
+        "add_dressup",
+        "describe_type",
+        "get_properties",
+        "set_properties",
+        "set_operation_order",
+        "inspect_job",
+        "inspect_path",
+        "post_process",
+        "export_job_template",
+        "check_job",
+        "simulate",
+        "place_model",
+        "import_tool_library",
+        "export_tool_library",
+    )
+)
+
+
+def dispatch(version: int, operation: str, args: dict[str, Any]) -> Any:
+    """Dispatch an explicitly supported CAM operation for a compatible client."""
+    if version != CAM_API_VERSION:
+        raise RuntimeError(
+            "Incompatible CAM interface: update the Robust MCP Bridge and MCP "
+            "server to compatible releases, then restart FreeCAD"
+        )
+    if operation not in _CAM_OPERATIONS:
+        raise ValueError(f"Unknown CAM operation: {operation!r}")
+    if not isinstance(args, dict):
+        raise ValueError("CAM operation arguments must be an object")
+    return globals()[operation](args)

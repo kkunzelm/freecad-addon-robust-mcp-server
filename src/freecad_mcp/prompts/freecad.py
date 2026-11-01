@@ -366,16 +366,15 @@ If boolean fails:
 ## Workflow
 1. `cam_get_capabilities()` - types, post processors, templates, known issues
 2. `cam_analyze_model(object_name)` - faces and holes for operation Base
-3. `cam_create_job(model_objects, template=..., stock={..., "material": ...})`
-   Stock material: one of `stock_materials` from cam_get_capabilities;
-   later `cam_set_stock(material=...)`. FreeCAD's default "Default" is not
-   a machining material.
+3. `cam_create_job(model_objects, template=...)`
+   On FreeCAD 26.3+, stock material can be selected from `stock_materials`
+   using `cam_set_stock(material=...)`.
 4. `cam_add_tool_controller(tool=..., op_type=...)`: speeds and feeds from
    the tool bit's preset for the stock material (FreeCAD 26.3+ feeds &
    speeds); explicit `horiz_feed="800 mm/min"` etc. override. Check the
    result's `feeds_speeds`. A template already holds tool controllers;
    `cam_feeds_speeds()` compares them with the presets.
-5. `cam_add_operation(op_type, tool_controller, base, properties)`
+5. `cam_add_operation(op_type, tool_controller=..., base=..., properties=...)`
 6. `cam_add_dressup("Tags", base_operation, tag_count=4)` etc.
 7. `cam_inspect_job()` - check every path summary: warnings and notes
 8. `cam_check_job()` - FreeCAD's job check (missing feeds, speeds, ...)
@@ -393,7 +392,7 @@ If boolean fails:
 
 ## Setups and Fixtures
 - Second side: a second job for the same model, then
-  `cam_place_model(rotate={"axis": "x", "angle": 180},
+  `cam_place_model(job_name=second_job_name, rotate={"axis": "x", "angle": 180},
   origin={"x": "min", "y": "min", "z": "top"})` (or `face_up=`).
 - Several workpieces/fixtures: Job.Fixtures (e.g. ["G54", "G55"]) and
   Job.OrderOutputBy ("Fixture", "Tool", "Operation") via cam_set_properties.

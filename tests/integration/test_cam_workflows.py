@@ -17,6 +17,7 @@ from uuid import uuid4
 import pytest
 
 from freecad_mcp.bridge.xmlrpc import XmlRpcBridge
+from freecad_mcp.config import get_config
 from freecad_mcp.tools.cam import register_cam_tools
 from tests.integration.auth_support import integration_credentials
 
@@ -93,7 +94,12 @@ def _register(bridge: XmlRpcBridge) -> Tools:
 @pytest.fixture
 async def bridge() -> AsyncIterator[XmlRpcBridge]:
     """A connected XML-RPC bridge."""
-    b = XmlRpcBridge(**integration_credentials())
+    config = get_config()
+    b = XmlRpcBridge(
+        host=config.socket_host,
+        port=config.xmlrpc_port,
+        **integration_credentials(),
+    )
     await b.connect()
     try:
         yield b

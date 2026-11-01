@@ -10,6 +10,8 @@ Based on learnings from competitive analysis:
 """
 
 import asyncio
+import importlib.machinery
+import importlib.util
 import io
 import os
 import sys
@@ -64,6 +66,7 @@ class EmbeddedBridge(FreecadBridge):
             DEFAULT_EXECUTION_TIMEOUT_MS,
         )
         self._fc_module: Any = None
+        self._cam_runtime: Any = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freecad")
         self._connected = False
 
@@ -170,6 +173,35 @@ class EmbeddedBridge(FreecadBridge):
 
         return result
 
+    def _cam_dispatch(self, version: int, operation: str, args: dict[str, Any]) -> Any:
+        """Load CAM without running the workbench's bridge auto-start code."""
+        if self._cam_runtime is None:
+            namespace = importlib.machinery.PathFinder.find_spec("freecad", sys.path)
+            workbench = (
+                importlib.machinery.PathFinder.find_spec(
+                    "RobustMCPBridge", namespace.submodule_search_locations
+                )
+                if namespace and namespace.submodule_search_locations
+                else None
+            )
+            if workbench and workbench.origin:
+                path = (
+                    Path(workbench.origin).parent / "freecad_mcp_bridge/cam_runtime.py"
+                )
+                spec = importlib.util.spec_from_file_location(
+                    "_embedded_cam_runtime", path
+                )
+                if spec and spec.loader and path.is_file():
+                    runtime = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(runtime)
+                    self._cam_runtime = runtime
+        if self._cam_runtime is None:
+            raise RuntimeError(
+                "CAM requires an updated Robust MCP Bridge workbench installed "
+                "in FreeCAD; install it and restart FreeCAD"
+            )
+        return self._cam_runtime.dispatch(version, operation, args)
+
     def _execute_code(self, code: str) -> ExecutionResult:
         """Execute code synchronously (runs in thread pool)."""
         start = time.perf_counter()
@@ -181,6 +213,7 @@ class EmbeddedBridge(FreecadBridge):
             "FreeCAD": self._fc_module,
             "App": self._fc_module,
             "__builtins__": __builtins__,
+            "_robust_mcp_cam_dispatch": self._cam_dispatch,
         }
 
         # Try to add GUI module if available
