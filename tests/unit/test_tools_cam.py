@@ -759,8 +759,41 @@ def test_rejects_unsafe_shared_output_directory(runtime: Any, tmp_path: Path) ->
         pytest.skip("POSIX directory permission bits are unavailable on Windows")
     tmp_path.chmod(0o777)
     try:
-        with pytest.raises(PermissionError, match="sticky-bit"):
+        with pytest.raises(PermissionError, match="not protected"):
             runtime._write_output_file(tmp_path / "job.nc", [("", "G1")], False)
     finally:
         tmp_path.chmod(0o700)
     assert not list(tmp_path.iterdir())
+
+
+def test_sticky_directory_with_untrusted_owner_is_rejected(runtime: Any) -> None:
+    """A sticky directory owner can replace files even when other users cannot."""
+    import os
+    from types import SimpleNamespace
+
+    if os.name == "nt":
+        pytest.skip("POSIX ownership is unavailable on Windows")
+    directory = MagicMock()
+    resolved = directory.resolve.return_value
+    resolved.parents = ()
+    resolved.stat.return_value = SimpleNamespace(st_mode=0o1777, st_uid=123456789)
+    with pytest.raises(PermissionError, match="not protected"):
+        runtime._validate_output_directory(directory)
+
+
+def test_rejects_untrusted_ancestor_directory(runtime: Any, tmp_path: Path) -> None:
+    """A writable ancestor can replace even a private output directory."""
+    import os
+
+    if os.name == "nt":
+        pytest.skip("POSIX directory permission bits are unavailable on Windows")
+    shared = tmp_path / "shared"
+    output_dir = shared / "private"
+    output_dir.mkdir(parents=True)
+    shared.chmod(0o777)
+    try:
+        with pytest.raises(PermissionError, match="not protected"):
+            runtime._write_output_file(output_dir / "job.nc", [("", "G1")], False)
+    finally:
+        shared.chmod(0o700)
+    assert not list(output_dir.iterdir())

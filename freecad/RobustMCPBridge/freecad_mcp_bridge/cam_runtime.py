@@ -2591,13 +2591,18 @@ def _validate_output_directory(directory: Any) -> None:
     """Reject POSIX directories where other users can replace staged files."""
     if os.name == "nt":
         return
-    permissions = directory.stat().st_mode
-    if permissions & 0o022 and not permissions & stat.S_ISVTX:
-        raise PermissionError(
-            f"Output directory {directory} is writable by other users without "
-            "sticky-bit protection; choose a private directory and copy the "
-            "verified program afterwards"
-        )
+    resolved = directory.resolve()
+    for component in (resolved, *resolved.parents):
+        info = component.stat()
+        permissions = info.st_mode
+        untrusted_owner = info.st_uid not in (0, os.geteuid())
+        shared_without_sticky = permissions & 0o022 and not permissions & stat.S_ISVTX
+        if untrusted_owner or shared_without_sticky:
+            raise PermissionError(
+                f"Output directory {directory} is not protected from replacement "
+                f"by other users at {component}; choose a private or trusted sticky "
+                "directory and copy the verified program afterwards"
+            )
 
 
 def _write_job_output(

@@ -463,9 +463,10 @@ world-writable; replacing an existing file preserves its permission bits.
 Replacement creates a new file and does not guarantee preservation of its
 previous owner, group, or access-control list; review those settings when they
 matter to your workflow.
-For secure staging, POSIX output directories must not be writable by other
-users unless the sticky bit is set. If needed, export to a private directory
-and copy the verified program to the destination.
+For secure staging, the POSIX output directory and its ancestors must be owned
+by the current user or root and must not be writable by other users unless the
+sticky bit is set. If needed, export to a private directory and copy the
+verified program to the destination.
 Split output is prepared before publication. Publication is not atomic as a
 group; if it fails, the error lists files already published. Inspect the output
 directory before using any of the files.
