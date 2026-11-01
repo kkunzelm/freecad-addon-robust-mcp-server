@@ -675,3 +675,33 @@ def test_new_output_matches_normal_file_permissions(
     output = tmp_path / "job.nc"
     runtime._write_output_file(output, [("", "G1")], False)
     assert stat.S_IMODE(output.stat().st_mode) == stat.S_IMODE(baseline.stat().st_mode)
+
+
+def test_atomic_rename_refuses_existing_destination(
+    runtime: Any, tmp_path: Path
+) -> None:
+    """Atomic fallback never replaces a file created by another process."""
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.write_text("new")
+    destination.write_text("existing")
+    with pytest.raises(FileExistsError):
+        runtime._rename_no_replace(source, destination)
+    assert source.read_text() == "new"
+    assert destination.read_text() == "existing"
+
+
+def test_unsupported_atomic_publication_leaves_no_output(
+    runtime: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If atomic publication is unavailable no partial program is exposed."""
+    import errno
+
+    def unsupported(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError(errno.ENOTSUP, "unsupported")
+
+    monkeypatch.setattr(runtime.os, "link", unsupported)
+    monkeypatch.setattr(runtime, "_rename_no_replace", unsupported)
+    with pytest.raises(OSError, match="cannot publish G-code atomically"):
+        runtime._write_output_file(tmp_path / "job.nc", [("", "G1")], False)
+    assert not list(tmp_path.iterdir())

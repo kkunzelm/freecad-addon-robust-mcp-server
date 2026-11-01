@@ -21,12 +21,14 @@ Targets FreeCAD 1.1 (CAM workbench, ``Path`` package).
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import importlib
 import math
 import os
 import secrets
-import shutil
 import stat
+import sys
 import traceback
 import warnings
 from pathlib import Path as FsPath
@@ -2495,6 +2497,54 @@ def _stage_output_file(path: Any, data: str, newline: str | None) -> Any:
     return temporary
 
 
+def _rename_no_replace(source: Any, destination: Any) -> None:
+    """Atomically rename without replacing an existing output, when supported."""
+    if os.name == "nt":
+        source.rename(destination)
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    src = os.fsencode(source)
+    dst = os.fsencode(destination)
+    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        rename = libc.renamex_np
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        result = rename(src, dst, 0x00000004)  # RENAME_EXCL
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        result = rename(-100, src, -100, dst, 1)  # AT_FDCWD, RENAME_NOREPLACE
+    else:
+        raise OSError(errno.ENOTSUP, "Atomic no-replace output is unavailable")
+    if result:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(destination))
+
+
+def _publish_no_replace(temporary: Any, path: Any) -> None:
+    """Publish without replacing an existing file or exposing partial data."""
+    try:
+        os.link(temporary, path)
+    except FileExistsError:
+        raise
+    except OSError as exc:
+        try:
+            _rename_no_replace(temporary, path)
+        except OSError as rename_error:
+            if rename_error.errno in (errno.ENOTSUP, errno.EINVAL, errno.ENOSYS):
+                raise OSError(
+                    rename_error.errno,
+                    "This filesystem cannot publish G-code atomically without "
+                    "overwriting; choose another output location",
+                ) from exc
+            raise
+
+
 def _publish_output_files(outputs: list[Any], overwrite: bool) -> None:
     """Stage all content before publishing; remove temporary files on failure."""
     staged: list[tuple[Any, Any]] = []
@@ -2506,17 +2556,8 @@ def _publish_output_files(outputs: list[Any], overwrite: bool) -> None:
             if overwrite:
                 temporary.replace(path)
             else:
-                try:
-                    os.link(temporary, path)
-                    published.append(path)
-                except FileExistsError:
-                    raise
-                except OSError:
-                    # FAT and some network shares do not support hard links.
-                    # Exclusive creation still prevents replacing another file.
-                    with temporary.open("rb") as source, path.open("xb") as target:
-                        published.append(path)
-                        shutil.copyfileobj(source, target)
+                _publish_no_replace(temporary, path)
+                published.append(path)
     except Exception:
         if not overwrite:
             for path in published:

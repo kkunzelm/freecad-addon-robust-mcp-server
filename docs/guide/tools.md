@@ -461,6 +461,8 @@ Explicit output files are protected from overwrite unless `overwrite=True`.
 Split output is prepared before publication. Replacing multiple existing files
 is not atomic as a group; if publication fails, inspect the output directory
 before using any of the files.
+If a filesystem cannot publish a new file atomically without replacing an
+existing one, select another output location and copy the verified program.
 
 `cam_post_process(use_job_output=True)` writes the files where FreeCAD's Post
 Process command would, named by the job's output pattern
