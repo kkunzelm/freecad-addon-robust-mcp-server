@@ -581,3 +581,45 @@ def test_embedded_cam_rejects_ambiguous_profile_installations(tmp_path: Path) ->
             bridge._find_profile_cam_runtime()
     finally:
         bridge._executor.shutdown(wait=True)
+
+
+def test_split_output_preparation_failure_leaves_no_files(
+    runtime: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = runtime.tempfile.NamedTemporaryFile
+    calls = 0
+
+    def fail_second(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("disk full")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.tempfile, "NamedTemporaryFile", fail_second)
+    with pytest.raises(OSError, match="disk full"):
+        runtime._write_output_file(
+            tmp_path / "job.nc", [("first", "G1"), ("second", "G2")], True
+        )
+    assert not list(tmp_path.iterdir())
+
+
+def test_split_output_publication_failure_removes_new_files(
+    runtime: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = runtime.os.link
+    calls = 0
+
+    def fail_second(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("publication failed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.os, "link", fail_second)
+    with pytest.raises(OSError, match="publication failed"):
+        runtime._write_output_file(
+            tmp_path / "job.nc", [("first", "G1"), ("second", "G2")], True
+        )
+    assert not list(tmp_path.iterdir())

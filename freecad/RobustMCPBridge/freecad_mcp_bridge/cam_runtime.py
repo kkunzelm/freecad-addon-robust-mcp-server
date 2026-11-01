@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
+import tempfile
 import traceback
 import warnings
 from pathlib import Path as FsPath
@@ -2469,10 +2471,42 @@ def _write_output_file(
                 f"Output already exists: {path}; pass overwrite=True to replace it"
             )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    for path, data in outputs:
-        with path.open("w" if overwrite else "x", encoding="utf-8") as output:
-            output.write(data)
+    _publish_output_files([(path, data, None) for path, data in outputs], overwrite)
     return [str(path) for path in paths]
+
+
+def _publish_output_files(outputs: list[Any], overwrite: bool) -> None:
+    """Stage all content before publishing; remove temporary files on failure."""
+    staged: list[tuple[Any, Any]] = []
+    published: list[Any] = []
+    try:
+        for path, data, newline in outputs:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline=newline,
+                dir=path.parent,
+                delete=False,
+            ) as output:
+                temporary = FsPath(output.name)
+                staged.append((temporary, path))
+                output.write(data)
+        for temporary, path in staged:
+            if overwrite:
+                temporary.replace(path)
+            else:
+                # Linking creates the destination only if it does not exist,
+                # including if another process creates it after the preflight.
+                os.link(temporary, path)
+                published.append(path)
+    except Exception:
+        if not overwrite:
+            for path in published:
+                path.unlink(missing_ok=True)
+        raise
+    finally:
+        for temporary, _ in staged:
+            temporary.unlink(missing_ok=True)
 
 
 def _write_job_output(
@@ -2518,16 +2552,18 @@ def _write_job_output(
     for path in paths:
         if path.is_symlink():
             raise ValueError(f"Refusing to write through a symbolic link: {path}")
+    staged_outputs: list[tuple[Any, str, str | None]] = []
     for path, gcode in outputs:
         path.parent.mkdir(parents=True, exist_ok=True)
         # line ends as in FreeCAD's Post Process command: a leading "\n\n" or a
         # "\r" means write unchanged, otherwise "\n" becomes the system's line end
         if gcode.startswith("\n\n"):
-            path.write_text(gcode[2:], newline="")
+            staged_outputs.append((path, gcode[2:], ""))
         elif "\r" in gcode:
-            path.write_text(gcode, newline="")
+            staged_outputs.append((path, gcode, ""))
         else:
-            path.write_text(gcode)
+            staged_outputs.append((path, gcode, None))
+    _publish_output_files(staged_outputs, overwrite=True)
     return [str(path) for path in paths]
 
 
