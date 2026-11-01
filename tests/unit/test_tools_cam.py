@@ -496,7 +496,10 @@ def test_output_rejects_symlinks(runtime: Any, tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.write_text("existing")
     link = tmp_path / "program.nc"
-    link.symlink_to(target)
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("Creating symbolic links is unavailable on this account")
     with pytest.raises(ValueError, match="symbolic link"):
         runtime._write_output_file(link, [("", "G1")], False, overwrite=True)
     assert target.read_text() == "existing"
@@ -534,3 +537,47 @@ def test_post_process_requires_active_operations(runtime: Any) -> None:
     job.Operations.Group = []
     with pytest.raises(ValueError, match="no active operations"):
         runtime._validate_post_operations(job)
+
+
+def test_embedded_cam_finds_workbench_in_active_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from freecad_mcp.bridge.embedded import EmbeddedBridge
+
+    workbench = tmp_path / "Mod/RobustMCPBridge/freecad/RobustMCPBridge"
+    runtime_dir = workbench / "freecad_mcp_bridge"
+    runtime_dir.mkdir(parents=True)
+    (workbench / "__init__.py").write_text(
+        "raise RuntimeError('unexpected auto-start')\n"
+    )
+    (runtime_dir / "cam_runtime.py").write_text(
+        "def dispatch(version, operation, args):\n    return operation\n"
+    )
+    monkeypatch.setattr("sys.path", [])
+    bridge = EmbeddedBridge()
+    bridge._fc_module = MagicMock()
+    bridge._fc_module.getUserAppDataDir.return_value = str(tmp_path)
+    try:
+        assert bridge._cam_dispatch(1, "capabilities", {}) == "capabilities"
+    finally:
+        bridge._executor.shutdown(wait=True)
+
+
+def test_embedded_cam_rejects_ambiguous_profile_installations(tmp_path: Path) -> None:
+    from freecad_mcp.bridge.embedded import EmbeddedBridge
+
+    for name in ("first", "second"):
+        runtime = (
+            tmp_path
+            / f"Mod/{name}/freecad/RobustMCPBridge/freecad_mcp_bridge/cam_runtime.py"
+        )
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("# installed runtime\n")
+    bridge = EmbeddedBridge()
+    bridge._fc_module = MagicMock()
+    bridge._fc_module.getUserAppDataDir.return_value = str(tmp_path)
+    try:
+        with pytest.raises(RuntimeError, match="Multiple Robust MCP Bridge"):
+            bridge._find_profile_cam_runtime()
+    finally:
+        bridge._executor.shutdown(wait=True)
