@@ -39,6 +39,8 @@ script_dir = str(Path(__file__).resolve().parent)
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
+from authentication import PairingRequiredError  # noqa: E402
+
 # Check if we're running inside FreeCAD
 try:
     import FreeCAD
@@ -131,12 +133,19 @@ def _start_bridge() -> None:
         FreeCAD.Console.PrintMessage("\n")
         FreeCAD.Console.PrintMessage("=" * 50 + "\n")
         FreeCAD.Console.PrintMessage("MCP Bridge started (via startup script)!\n")
-        FreeCAD.Console.PrintMessage(f"  - XML-RPC: localhost:{xmlrpc_port}\n")
-        FreeCAD.Console.PrintMessage(f"  - Socket:  localhost:{socket_port}\n")
+        listeners = plugin.get_status()["listeners"]
+        FreeCAD.Console.PrintMessage(
+            f"  - XML-RPC: {listeners['xmlrpc']} (localhost:{xmlrpc_port})\n"
+        )
+        FreeCAD.Console.PrintMessage(
+            f"  - JSON-RPC: {listeners['socket']} (localhost:{socket_port})\n"
+        )
         FreeCAD.Console.PrintMessage(
             f"  - Mode:    {'GUI' if FreeCAD.GuiUp else 'Headless'}\n"
         )
         FreeCAD.Console.PrintMessage("=" * 50 + "\n\n")
+    except PairingRequiredError as e:
+        FreeCAD.Console.PrintError(f"Failed to start MCP Bridge: {e}\n")
     except Exception as e:
         FreeCAD.Console.PrintError(f"Failed to start MCP Bridge: {e}\n")
         FreeCAD.Console.PrintError(traceback.format_exc())

@@ -9,8 +9,9 @@ This page also covers source installations and other configuration options.
 
 ## Requirements
 
-- **FreeCAD 1.1.4 or newer** is recommended for security. Older versions may
-  work but have known vulnerabilities when opening untrusted documents.
+- **FreeCAD 1.0.2 or newer** is required. FreeCAD 1.1.4 or newer is recommended
+  for security; earlier releases have known vulnerabilities when opening untrusted
+  documents.
 - **Python 3.11 or newer** for the separate MCP server. Embedded mode requires
   a Python minor version matching the FreeCAD build and is supported on Linux.
 - An **MCP-compatible AI assistant** (Claude Code, Cursor, etc.)
@@ -159,6 +160,14 @@ uv run freecad-mcp --pair-bridge
 A server running in a container or under a different account needs access to the
 same pairing credential; pairing the host account alone does not provision it
 there. For credential storage and alternative setups, see [Configuration](configuration.md).
+
+If FreeCAD reports that the bridge is not paired, run the pairing command in a
+terminal as the same user who runs FreeCAD. If `freecad-mcp` is not on your
+`PATH`, use the full path to the installed executable. Then select **Start MCP
+Bridge** in FreeCAD. If you restart FreeCAD instead, the bridge starts
+automatically only when auto-start is enabled; otherwise, select **Start MCP
+Bridge** after FreeCAD reopens. One pairing is shared by compatible workbench
+installations under that user account.
 
 ### Step 2: Start FreeCAD with the Robust MCP Bridge
 

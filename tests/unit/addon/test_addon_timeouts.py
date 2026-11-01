@@ -36,6 +36,155 @@ ADDON_DIR = Path(__file__).parent.parent.parent.parent / "freecad" / "RobustMCPB
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("blocked", ["socket", "xmlrpc", "both", "neither"])
+async def test_listener_port_conflicts_preserve_authenticated_transport(
+    server_mod: Any, monkeypatch: pytest.MonkeyPatch, blocked: str
+) -> None:
+    """An occupied port must not disable or bypass authentication on the other."""
+    console = MagicMock()
+    monkeypatch.setattr(server_mod, "FREECAD_AVAILABLE", True)
+    monkeypatch.setattr(
+        server_mod, "FreeCAD", MagicMock(Console=console), raising=False
+    )
+    auth = importlib.import_module("freecad_mcp_bridge.authentication")
+    secret = b"a" * 32
+    authenticator = auth.BridgeAuthenticator(
+        auth.create_hmac_verifier(lambda client: secret if client == "test" else None)
+    )
+    blockers: dict[str, socket.socket] = {}
+    ports: dict[str, int] = {}
+    for name in ("socket", "xmlrpc"):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        ports[name] = listener.getsockname()[1]
+        if blocked in (name, "both"):
+            blockers[name] = listener
+        else:
+            listener.close()
+    plugin = server_mod.FreecadMCPPlugin(
+        host="127.0.0.1",
+        port=ports["socket"],
+        xmlrpc_port=ports["xmlrpc"],
+        authenticator=authenticator,
+    )
+    plugin._start_queue_processor = MagicMock()
+    plugin._start_status_updates = MagicMock()
+    plugin._stop_status_updates = MagicMock()
+    plugin._execute_via_queue = MagicMock(
+        return_value={"success": True, "result": "ok"}
+    )
+    try:
+        if blocked == "both":
+            with pytest.raises(RuntimeError, match="could not start") as error:
+                await asyncio.to_thread(plugin.start)
+            assert "XML-RPC" in str(error.value) and "JSON-RPC" in str(error.value)
+            assert "preferences" in str(error.value)
+            assert not plugin.is_running
+        else:
+            await asyncio.to_thread(plugin.start)
+            status = plugin.get_status()
+            assert plugin.is_running
+            for name in ("socket", "xmlrpc"):
+                assert status["listeners"][name] == (
+                    "failed" if blocked == name else "running"
+                )
+                if blocked == name:
+                    assert "in use" in status["listener_errors"][name]
+                    assert "preferences" in status["listener_errors"][name]
+                    assert status["listener_errors"][name] in "".join(
+                        args.args[0] for args in console.PrintError.call_args_list
+                    )
+                    continue
+                if sys.platform == "win32":
+                    with socket.socket() as competing:
+                        competing.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        with pytest.raises(OSError):
+                            competing.bind(("127.0.0.1", ports[name]))
+                bridge_class = SocketBridge if name == "socket" else XmlRpcBridge
+
+                def signer(message: bytes) -> bytes:
+                    return hmac.digest(secret, message, "sha256")
+
+                bridge = bridge_class(
+                    host="127.0.0.1", port=ports[name], client_id="test", signer=signer
+                )
+                impostor = bridge_class(
+                    host="127.0.0.1",
+                    port=ports[name],
+                    client_id="test",
+                    signer=lambda message: hmac.digest(b"b" * 32, message, "sha256"),
+                )
+                try:
+                    with pytest.raises(ConnectionError):
+                        await impostor.connect()
+                    await bridge.connect()
+                    result = await bridge.execute_python("pass")
+                    assert result.success and result.result == "ok"
+                finally:
+                    await impostor.disconnect()
+                    await bridge.disconnect()
+    finally:
+        await asyncio.to_thread(plugin.stop)
+        for listener in blockers.values():
+            listener.close()
+    assert not plugin.is_running
+    for name in ("socket", "xmlrpc"):
+        with socket.socket() as probe:
+            probe.settimeout(1)
+            assert probe.connect_ex(("127.0.0.1", ports[name])) != 0
+
+
+def test_partial_start_can_stop_and_restart_after_port_is_freed(
+    server_mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stopping a degraded bridge releases its listener and allows recovery."""
+    monkeypatch.setattr(server_mod, "FREECAD_AVAILABLE", False)
+    with socket.socket() as blocker:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen()
+        port = blocker.getsockname()[1]
+        plugin = server_mod.FreecadMCPPlugin(
+            host="127.0.0.1", port=port, xmlrpc_port=0, authenticator=MagicMock()
+        )
+        plugin._start_queue_processor = MagicMock()
+        plugin._start_status_updates = MagicMock()
+        plugin._stop_status_updates = MagicMock()
+        try:
+            plugin.start()
+            assert plugin.get_status()["listeners"] == {
+                "socket": "failed",
+                "xmlrpc": "running",
+            }
+            plugin.stop()
+        finally:
+            plugin.stop()
+    try:
+        plugin.start()
+        assert plugin.get_status()["listeners"] == {
+            "socket": "running",
+            "xmlrpc": "running",
+        }
+    finally:
+        plugin.stop()
+
+
+def test_listener_startup_timeout_names_transport_and_cleans_up(
+    server_mod: Any,
+) -> None:
+    """A stalled listener produces actionable transport-specific guidance."""
+    plugin = server_mod.FreecadMCPPlugin(port=9876, xmlrpc_port=9875)
+    plugin._listener_ready["socket"] = MagicMock()
+    plugin._listener_ready["socket"].wait.return_value = False
+    plugin._listener_ready["xmlrpc"] = MagicMock()
+    plugin._listener_ready["xmlrpc"].wait.return_value = True
+    plugin.stop = MagicMock()
+    with pytest.raises(RuntimeError, match=r"JSON-RPC.*9876.*preferences"):
+        plugin._await_listeners()
+    plugin.stop.assert_called_once_with()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("transport", ["socket", "xmlrpc"])
 @pytest.mark.parametrize("algorithm", ["ed25519", "p256"])
 async def test_real_signatures_across_client_and_listener(
@@ -196,7 +345,7 @@ def test_start_refuses_missing_authentication_before_opening_listeners(
     )
     plugin = server_mod.FreecadMCPPlugin()
     plugin._start_queue_processor = MagicMock()
-    with pytest.raises(RuntimeError, match="authentication provider is required"):
+    with pytest.raises(RuntimeError, match="freecad-mcp --pair-bridge"):
         plugin.start()
     plugin._start_queue_processor.assert_not_called()
     assert not plugin.is_running
@@ -216,10 +365,18 @@ def test_gui_status_warns_that_bridge_accepts_python(
         sys.modules, "freecad.RobustMCPBridge.Qt.status_widget", status_module
     )
     plugin = server_mod.FreecadMCPPlugin()
+    plugin._listener_states = {"xmlrpc": "running", "socket": "running"}
     plugin._set_status_bar = MagicMock()
     plugin._update_status_bar()
     assert "Python execution enabled" in plugin._set_status_bar.call_args.args[0]
-    status_module.update_status_running.assert_called_once_with(9875, 9876, 0)
+    status_module.update_status_running.assert_called_once_with(
+        9875, 9876, 0, xmlrpc_running=True, socket_running=True, errors=""
+    )
+    plugin._listener_states["xmlrpc"] = "disabled"
+    plugin._update_status_bar()
+    status_module.update_status_running.assert_called_with(
+        9875, 9876, 0, xmlrpc_running=False, socket_running=True, errors=""
+    )
 
 
 @pytest.mark.parametrize("freecad_available", [False, True])
@@ -276,6 +433,18 @@ def test_permanent_status_widget_warns_that_bridge_accepts_python(
     widget.set_running(9875, 9876, 1)
     assert "Python execution enabled" in widget._widget.setText.call_args.args[0]
     assert "authorized clients" in widget._widget.setToolTip.call_args.args[0]
+    widget.set_running(
+        9875,
+        9876,
+        1,
+        xmlrpc_running=True,
+        socket_running=False,
+        errors="JSON-RPC port 9876 is in use; check preferences",
+    )
+    assert "partial" in widget._widget.setText.call_args.args[0]
+    tooltip = widget._widget.setToolTip.call_args.args[0]
+    assert "XML-RPC: listening" in tooltip and "JSON-RPC: unavailable" in tooltip
+    assert "check preferences" in tooltip and "authorized clients" in tooltip
 
 
 @pytest.fixture
@@ -719,8 +888,17 @@ def test_xmlrpc_total_read_deadline_stops_a_slow_client(
                     break
             try:
                 assert client.recv(1) == b""
-            except ConnectionResetError:
+            except (ConnectionResetError, ConnectionAbortedError):
                 pass
+        assert thread.is_alive()
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            connection.request("GET", "/")
+            response = connection.getresponse()
+            assert response.status == 200
+            response.read()
+        finally:
+            connection.close()
     finally:
         plugin._running = False
         thread.join(timeout=3)
